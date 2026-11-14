@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Router } from 'express';
 import multer from 'multer';
 import { getReview, getReviews, saveReview } from './store.js';
-import { requireRole } from './auth.js';
+import { requireRecentAuth, requireRole } from './auth.js';
 
 export const reviewsRouter = Router();
 
@@ -42,7 +42,7 @@ reviewsRouter.post('/', requireRole(['owner','administrator','brand_manager','cr
   return response.status(201).json({ data: review });
 });
 
-reviewsRouter.patch('/:id', (request, response) => {
+reviewsRouter.patch('/:id', (request, response, next) => request.body?.status === 'Approved' ? requireRecentAuth(request, response, next) : next(), (request, response) => {
   const review = getReview(request.user.workspaceId, request.params.id);
   if (!review) return response.status(404).json({ error: 'Review not found.' });
   if (request.user.role === 'creator' && review.ownerId !== request.user.userId) return response.status(404).json({ error: 'Review not found.' });

@@ -5,9 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { reviewsRouter } from './services/reviews.js';
 import { sourcesRouter } from './services/sources.js';
-import { authRouter, csrfProtection, requireAuth } from './services/auth.js';
+import { authRouter, csrfProtection, requireWorkspaceAuth } from './services/auth.js';
 import { verificationRouter } from './services/verification.js';
 import { workspaceRouter } from './services/workspace.js';
+import { encryptionKey } from './services/mfa.js';
 
 const rootEnv = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../.env');
 try {
@@ -29,6 +30,10 @@ export function validateEnvironment(env = process.env) {
       if (!['https:', 'http:'].includes(parsed.protocol) || parsed.origin !== origin || origin === '*' || parsed.username || parsed.password) throw new Error('Every CORS_ORIGINS entry must be an exact origin.');
       if (parsed.protocol !== 'https:') throw new Error('Production CORS_ORIGINS entries must use HTTPS.');
     }
+    if (!env.APP_BASE_URL || !env.APP_BASE_URL.startsWith('https://')) throw new Error('Production requires an HTTPS APP_BASE_URL.');
+    for (const name of ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'MAIL_FROM']) if (!env[name]) throw new Error(`Production requires ${name}.`);
+    if (!Number.isInteger(Number(env.SMTP_PORT)) || Number(env.SMTP_PORT) < 1 || Number(env.SMTP_PORT) > 65535) throw new Error('Production requires a valid SMTP_PORT.');
+    try { encryptionKey(env.MFA_ENCRYPTION_KEY); } catch { throw new Error('Production requires a valid 32-byte MFA_ENCRYPTION_KEY.'); }
   }
   if (env.SESSION_SECRET && env.SESSION_SECRET.length < 32 && env.NODE_ENV !== 'production') throw new Error('SESSION_SECRET must be at least 32 characters when configured.');
   return true;
@@ -54,7 +59,7 @@ export function createApp() {
   app.use(csrfProtection);
   app.get('/api/health', (_request, response) => response.json({ status: 'ok', service: 'cleared-api' }));
   app.use('/api/auth', authRouter);
-  app.use('/api', requireAuth);
+  app.use('/api', requireWorkspaceAuth);
   app.use('/api/workspace', workspaceRouter);
   app.use('/api/reviews', reviewsRouter);
   app.use('/api/sources', sourcesRouter);

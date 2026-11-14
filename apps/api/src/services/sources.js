@@ -4,8 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Router } from 'express';
 import multer from 'multer';
-import { getSources, saveSource } from './store.js';
-import { requireRole } from './auth.js';
+import { deleteSource, getSources, saveSource } from './store.js';
+import { requireRecentAuth, requireRole } from './auth.js';
 
 export const sourcesRouter = Router();
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -34,4 +34,9 @@ sourcesRouter.post('/', requireRole(['owner','administrator','brand_manager']), 
   const source = { id: randomUUID(), workspaceId: request.user.workspaceId, version: 1, name, category, updated: new Date().toISOString(), owner: request.user.email, type: extension.slice(1).toUpperCase(), fileName: request.file.originalname, size: request.file.size, text };
   saveSource(request.user.workspaceId, source);
   return response.status(201).json({ data: source });
+});
+
+sourcesRouter.delete('/:id', requireRole(['owner', 'administrator', 'brand_manager']), requireRecentAuth, (request, response) => {
+  const deleted = deleteSource(request.user.workspaceId, request.params.id);
+  return deleted ? response.json({ deleted: true }) : response.status(404).json({ error: 'Source not found.' });
 });

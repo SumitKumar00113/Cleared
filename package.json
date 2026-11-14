@@ -2,7 +2,7 @@
   "name": "cleared-platform",
   "version": "0.1.0",
   "private": true,
-  "engines": { "node": "24.19.x" },
+  "engines": { "node": "24.19.0" },
   "workspaces": ["apps/web", "apps/api"],
   "scripts": {
     "dev": "concurrently -k -n api,web -c green,cyan \"npm run dev:api\" \"npm run dev:web\"",

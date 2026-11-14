@@ -1,0 +1,9 @@
+node_modules/
+apps/web/dist/
+apps/api/uploads/
+apps/api/data/
+.env
+.env.*
+!.env.example
+*.log
+coverage/

@@ -1,0 +1,11 @@
+{
+ "page": null,
+ "url": "http://localhost:5181/app?design=board-v3",
+ "root": null,
+ "kind": "software",
+ "category": "pre-publication brand governance platform",
+ "primary": "Check draft",
+ "rounds": 3,
+ "start": "2026-11-13T10:23:15.788Z",
+ "by": "gate.mjs --start"
+}

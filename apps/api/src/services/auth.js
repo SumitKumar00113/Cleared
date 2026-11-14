@@ -1,6 +1,6 @@
 import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Router } from 'express';
-import { acceptInvitation, activateMfa, authenticateUser, changeVerifiedEmail, checkAuthLimit, clearAuthFailures, clearAuthFailuresForAccount, completeMfaChallenge, consumeActionToken, consumeRequestLimit, consumeTotpStep, createActionToken, createMfaChallenge, createSession, createWorkspaceAccount, derivePasswordCredentials, getActionToken, getMfaChallenge, getMembership, getMfaUser, getSession, getUserByEmail, getUserById, invalidateOtherPasswordResetTokens, isCommonPassword, listActiveSessions, markSessionRecentlyAuthenticated, recordAuthFailure, revokeListedSession, revokeSession, revokeUserSessions, savePendingMfaSecret, setEmailVerified, updatePassword } from './store.js';
+import { acceptInvitation, activateMfa, authenticateUser, changeVerifiedEmail, checkAuthLimit, clearAuthFailures, clearAuthFailuresForAccount, completeMfaChallenge, consumeActionToken, consumeRequestLimit, consumeTotpStep, createActionToken, createMfaChallenge, createSession, createWorkspaceAccount, derivePasswordCredentials, getActionToken, getMfaChallenge, getMembership, getMfaUser, getSession, getUserByEmail, getUserById, invalidateOtherPasswordResetTokens, isCommonPassword, listActiveSessions, markSessionRecentlyAuthenticated, recordAuthFailure, recordAuditEvent, revokeListedSession, revokeSession, revokeUserSessions, savePendingMfaSecret, setEmailVerified, updatePassword } from './store.js';
 import { sendMail } from './mailer.js';
 import { decryptTotpSecret, encryptTotpSecret, enrollmentUri, generateRecoveryCodes, generateTotpSecret, hashRecoveryCode, matchingTotpStep } from './mfa.js';
 
@@ -116,19 +116,21 @@ authRouter.post('/login', rateLimited, async (request, response, next) => {
   try {
     const account = await authenticateUser(request.body?.email, request.body?.password);
     const membership = account && getMembership(String(request.body?.workspaceId || ''), account.id);
-    if (!account || !membership) { recordAuthFailure(keys.filter((key) => !key.startsWith('ip:'))); return response.status(401).json({ error: 'The email, password, or workspace is incorrect.' }); }
+    if (!account || !membership) { recordAuthFailure(keys.filter((key) => !key.startsWith('ip:'))); const knownUser=getUserByEmail(request.body?.email); const attempted=String(request.body?.workspaceId||''); const failedWorkspace=knownUser?getMembership(attempted,knownUser.id)?.workspaceId:null; recordAuditEvent({workspaceId:failedWorkspace||null,actorId:knownUser?.id||null,action:'auth.sign_in_failed',targetType:'account',targetId:knownUser?.id||null,requestOrigin:request.get('origin')||request.get('referer')||null}); return response.status(401).json({ error: 'The email, password, or workspace is incorrect.' }); }
     clearAuthFailures(keys.filter((key) => !key.startsWith('ip:')));
     if (!membership.emailVerified) {
       clearSessionCookie(response);
       return response.json({ authenticated: false, verificationRequired: true, email: membership.email });
     }
     if (membership.mfaEnabled) {
+      recordAuditEvent({workspaceId:membership.workspaceId,actorId:membership.userId,action:'auth.sign_in',targetType:'session',targetId:null,requestOrigin:request.get('origin')||request.get('referer')||null,details:{mfaRequired:true}});
       const challengeToken = randomBytes(32).toString('base64url');
       createMfaChallenge({ token: challengeToken, userId: membership.userId, workspaceId: membership.workspaceId, userAgent: request.get('user-agent') || '' });
       clearSessionCookie(response);
       return response.json({ authenticated: false, mfaRequired: true, challengeToken, email: membership.email });
     }
     attachCookie(response, membership, request);
+    recordAuditEvent({workspaceId:membership.workspaceId,actorId:membership.userId,action:'auth.sign_in',targetType:'session',targetId:null,requestOrigin:request.get('origin')||request.get('referer')||null});
     return response.json({ authenticated: true, user: sessionUser(membership) });
   } catch (error) { return next(error); }
 });
@@ -141,6 +143,7 @@ authRouter.post('/invitations/accept', rateLimited, async (request, response, ne
     const result = await acceptInvitation(input);
     if (result.error) { recordAuthFailure(keys.filter((key) => !key.startsWith('ip:'))); return response.status(400).json({ error: 'The invitation details are invalid or expired.' }); }
     clearAuthFailures(keys.filter((key) => !key.startsWith('ip:')));
+    recordAuditEvent({workspaceId:result.user.workspaceId,actorId:result.user.userId,action:'invitation.accepted',targetType:'member',targetId:result.user.userId,requestOrigin:request.get('origin')||request.get('referer')||null});
     if (result.user.mfaEnabled) {
       const challengeToken = randomBytes(32).toString('base64url');
       createMfaChallenge({ token: challengeToken, userId: result.user.userId, workspaceId: result.user.workspaceId, userAgent: request.get('user-agent') || '' });
@@ -256,6 +259,7 @@ authRouter.post('/mfa/challenge', rateLimited, (request, response) => {
   clearAuthFailures(keys);
   const user = getMembership(completed.workspaceId, completed.userId);
   attachCookie(response, user, request, { mfaVerified: true });
+  recordAuditEvent({workspaceId:completed.workspaceId,actorId:completed.userId,action:'auth.sign_in',targetType:'session',targetId:null,requestOrigin:request.get('origin')||request.get('referer')||null,details:{mfaVerified:true}});
   return response.json({ authenticated: true, user: sessionUser({ ...user, mfaVerified: true }) });
 });
 authRouter.post('/mfa/enroll/start', requireAuth, authRateLimit, (request, response) => {
@@ -264,6 +268,7 @@ authRouter.post('/mfa/enroll/start', requireAuth, authRateLimit, (request, respo
   if (current?.enabled) return response.status(409).json({ error: 'MFA is already enabled.' });
   const secret = generateTotpSecret();
   savePendingMfaSecret(request.user.userId, encryptTotpSecret(secret));
+  recordAuditEvent({workspaceId:request.user.workspaceId,actorId:request.user.userId,action:'mfa.enrollment_started',targetType:'user',targetId:request.user.userId,requestOrigin:request.get('origin')||request.get('referer')||null});
   return response.json({ data: { secret, otpauthUrl: enrollmentUri(secret, request.user.email) } });
 });
 authRouter.post('/mfa/enroll/confirm', requireAuth, authRateLimit, (request, response) => {
@@ -277,6 +282,7 @@ authRouter.post('/mfa/enroll/confirm', requireAuth, authRateLimit, (request, res
   const encrypted = current.pendingSecretEncrypted;
   const activated = activateMfa(request.user.userId, encrypted, step, recoveryCodes.map(hashRecoveryCode), rawCookie(request).split('.')[0]);
   if (!activated) return response.status(409).json({ error: 'MFA setup could not be completed. Start again.' });
+  recordAuditEvent({workspaceId:request.user.workspaceId,actorId:request.user.userId,action:'mfa.enabled',targetType:'user',targetId:request.user.userId,requestOrigin:request.get('origin')||request.get('referer')||null});
   clearAuthFailures(keys);
   return response.json({ enabled: true, recoveryCodes, user: { ...sessionUser({ ...request.user, mfaEnabled: true, mfaVerified: true }), mfaSetupRequired: false } });
 });

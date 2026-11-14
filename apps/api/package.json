@@ -9,7 +9,11 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "node --test"
+    "test": "node --test test/*.test.js",
+    "test:integration": "node --test test/integration/phase2-services.test.js",
+    "db:up": "node scripts/migrate-phase3.js up",
+    "db:down": "node scripts/migrate-phase3.js down",
+    "sources:rescan-legacy": "node scripts/rescan-legacy-sources.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

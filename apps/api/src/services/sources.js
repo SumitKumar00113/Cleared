@@ -58,7 +58,7 @@ sourcesRouter.post('/', canManageSources, upload.single('file'), async (request,
     const id = randomUUID();
     const uploaded = await storeTextUpload({ upload: request.file, request, purpose: 'source', resourceId: id, ownerId: request.user.userId });
     file = uploaded;
-    const version = { version: 1, fileId: uploaded.record.id, ownerId: request.user.userId, uploaderId: request.user.userId, checksum: uploaded.record.checksum, uploadedAt: uploaded.record.uploadedAt, expiresAt };
+    const version = { version: 1, fileId: uploaded.record.id, ownerId: request.user.userId, uploaderId: request.user.userId, checksum: uploaded.record.checksum, uploadedAt: uploaded.record.uploadedAt, expiresAt,requestOrigin:request.get('origin')||request.get('referer')||null };
     const source = { id, workspaceId: request.user.workspaceId, version: 1, name, category, updated: version.uploadedAt, uploadedAt: version.uploadedAt, owner: request.user.email, ownerId: request.user.userId, uploader: request.user.email, uploaderId: request.user.userId, type: uploaded.record.contentType.split(';')[0].toUpperCase(), fileName: uploaded.record.originalName, size: uploaded.record.size, checksum: version.checksum, fileId: uploaded.record.id, expiresAt: version.expiresAt, scanStatus: uploaded.record.scanStatus };
     saveSourceVersion(request.user.workspaceId, source, version);
     const responseSource = publicSource(source, uploaded, '');
@@ -81,7 +81,7 @@ sourcesRouter.post('/:id/versions', canManageSources, upload.single('file'), asy
     const versionNumber = Math.max(existing.version || 0, ...rows.map((item) => item.version)) + 1;
     const uploaded = await storeTextUpload({ upload: request.file, request, purpose: 'source', resourceId: existing.id, ownerId: existing.ownerId || request.user.userId, action: 'new_version' });
     file = uploaded;
-    const version = { version: versionNumber, fileId: uploaded.record.id, ownerId: existing.ownerId || request.user.userId, uploaderId: request.user.userId, checksum: uploaded.record.checksum, uploadedAt: uploaded.record.uploadedAt, expiresAt };
+    const version = { version: versionNumber, fileId: uploaded.record.id, ownerId: existing.ownerId || request.user.userId, uploaderId: request.user.userId, checksum: uploaded.record.checksum, uploadedAt: uploaded.record.uploadedAt, expiresAt,requestOrigin:request.get('origin')||request.get('referer')||null };
     const source = { ...existing, version: versionNumber, updated: version.uploadedAt, uploadedAt: version.uploadedAt, uploader: request.user.email, uploaderId: request.user.userId, type: uploaded.record.contentType.split(';')[0].toUpperCase(), fileName: uploaded.record.originalName, size: uploaded.record.size, checksum: version.checksum, fileId: uploaded.record.id, expiresAt: version.expiresAt, scanStatus: uploaded.record.scanStatus };
     saveSourceVersion(request.user.workspaceId, source, version);
     return response.status(201).json({ data: publicSource(source, uploaded, '') });
@@ -100,10 +100,10 @@ sourcesRouter.delete('/:id', requireRole(['owner', 'administrator', 'brand_manag
       const file = getStoredFile(request.user.workspaceId, version.fileId);
       if (file && !file.deletedAt) {
         await deleteStoredObject(file);
-        markStoredFileDeleted(request.user.workspaceId, file.id, request.user.userId);
+        markStoredFileDeleted(request.user.workspaceId, file.id, request.user.userId,request.get('origin')||request.get('referer')||null);
       }
     }
-    deleteSource(request.user.workspaceId, source.id);
+    deleteSource(request.user.workspaceId, source.id, request.user.userId,request.get('origin')||request.get('referer')||null);
     return response.json({ deleted: true });
   } catch (error) { return response.status(500).json({ error: 'Could not delete this source.' }); }
 });

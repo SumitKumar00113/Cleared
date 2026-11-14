@@ -103,3 +103,8 @@ body{background:var(--page);color:var(--ink);font-family:'Bricolage Grotesque',s
 .remove-member{width:36px;height:36px;display:grid;place-items:center;border:1px solid #e5eae6;border-radius:7px;background:#fff;color:#8f3a56}.remove-member:hover{background:#fff2f5}
 .member-readonly{margin-top:18px;padding:15px;border-radius:8px;background:#f5f8f6;color:#52665e;font-size:14px}
 @media(max-width:700px){.workspace-identity,.member-management{padding:16px}.invite-form{grid-template-columns:1fr}.invite-result{grid-template-columns:1fr}.member-table-head{display:none}.member-row{grid-template-columns:minmax(120px,1fr) minmax(130px,.8fr) 36px}.member-access{display:none}.workspace-id-row{align-items:flex-start;flex-direction:column}.workspace-id-row .button{width:100%}}
+.review-history { border-top:1px solid rgba(52,54,50,.12); margin-top:22px; padding-top:18px; }
+.review-history ol { list-style:none; margin:14px 0 4px; padding:0 0 0 14px; border-left:1px solid rgba(52,54,50,.18); display:grid; gap:15px; }
+.review-history li { position:relative; display:grid; gap:4px; color:#383b37; font-size:13px; line-height:1.45; }
+.review-history li::before { content:""; position:absolute; width:7px; height:7px; border-radius:50%; background:#43866e; left:-18px; top:5px; box-shadow:0 0 0 3px #fff; }
+.review-history time { color:#787b73; font-size:11px; }

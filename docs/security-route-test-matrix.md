@@ -25,23 +25,26 @@ Cross-workspace tests use two separately created workspaces and exercise foreign
 | `POST /api/auth/logout` | `sign out everywhere...`; `MFA challenges reject...` |
 | `POST /api/auth/logout-everywhere` | `sign out everywhere revokes every session for the account` |
 | `GET /api/workspace` | `every workspace API family keeps cross-workspace identifiers isolated` |
-| `GET /api/workspace/members` | `every workspace API family...` |
-| `POST /api/workspace/invitations` | `every workspace API family...`; `workspace invites create members...` |
+| `GET /api/workspace/members` | `every workspace API family keeps cross-workspace identifiers isolated` (foreign member is absent) |
+| `POST /api/workspace/invitations` | `every workspace API family keeps cross-workspace identifiers isolated`; `workspace invites create members...` (invitation is created only in caller workspace) |
 | `PATCH /api/workspace/members/:userId` | `every workspace API family...`; `membership role changes and removals revoke...` |
 | `DELETE /api/workspace/members/:userId` | `every workspace API family...`; `membership role changes and removals revoke...` |
-| `GET /api/reviews` | `every workspace API family...` (foreign workspace has no rows) |
-| `POST /api/reviews` | `every workspace API family...` (created in caller workspace) |
-| `PATCH /api/reviews/:id` | `every workspace API family...` (foreign review is 404) |
-| `GET /api/sources` | `every workspace API family...` (foreign workspace has no rows) |
-| `POST /api/sources` | `every workspace API family...` (created in caller workspace) |
-| `GET /api/sources/:id/versions` | `source versions are retained...` (workspace-scoped history) |
-| `POST /api/sources/:id/versions` | `source versions are retained and expired latest sources are excluded from verification` |
-| `GET /api/sources/collections/:category/access` | `collection access policies deny unlisted members...` |
-| `PUT /api/sources/collections/:category/access` | `collection access policies deny unlisted members...` (owner-configured user allowlist) |
-| `DELETE /api/sources/:id` | `every workspace API family...` (foreign source is 404) |
-| `POST /api/verification/check/:reviewId` | `every workspace API family...` (foreign review is 404) |
-| `POST /api/files/:fileId/link` | `private source downloads are workspace and user bound...`; `bad text...` (quarantine denies links) |
-| `GET /api/files/:fileId/download` | `private source downloads are workspace and user bound...` (cross-workspace, tampered/expired token, nosniff, quarantine recheck) |
-| `POST /api/files/:fileId/scan` | `bad text...` exercises scanner-not-configured refusal through scanner adapter; route also requires workspace auth, manager role, and recent auth |
+| `GET /api/reviews` | `every workspace API family keeps cross-workspace identifiers isolated` (A's review is absent from B list) |
+| `POST /api/reviews` | `every workspace API family keeps cross-workspace identifiers isolated` (create is scoped to caller workspace) |
+| `PATCH /api/reviews/:id` | `every workspace API family keeps cross-workspace identifiers isolated` (foreign review is 404); `review revisions are attributed...` (revision and decision binding) |
+| `GET /api/reviews/:id/history` | `review history and audit list/export remain isolated across workspaces` (foreign review is 404) |
+| `GET /api/sources` | `every workspace API family keeps cross-workspace identifiers isolated` (A source is absent from B list) |
+| `POST /api/sources` | `every workspace API family keeps cross-workspace identifiers isolated` (create is scoped to caller workspace) |
+| `GET /api/sources/:id/versions` | `source versions are retained...`; `review history and audit list/export remain isolated across workspaces` (foreign source is 404) |
+| `POST /api/sources/:id/versions` | `source versions are retained...`; `review history and audit list/export remain isolated across workspaces` (foreign source is 404) |
+| `GET /api/sources/collections/:category/access` | `collection access policies deny unlisted members...`; `review history and audit list/export remain isolated across workspaces` (A policy is absent in B) |
+| `PUT /api/sources/collections/:category/access` | `collection access policies deny unlisted members...`; `review history and audit list/export remain isolated across workspaces` (foreign user ID rejected) |
+| `DELETE /api/sources/:id` | `every workspace API family keeps cross-workspace identifiers isolated` (foreign source is 404) |
+| `POST /api/verification/check/:reviewId` | `every workspace API family keeps cross-workspace identifiers isolated` (foreign review is 404) |
+| `POST /api/files/:fileId/link` | `private source downloads are workspace and user bound...`; `review history and audit list/export remain isolated...` (foreign file is 404); `bad text...` (quarantine denies links) |
+| `GET /api/files/:fileId/download` | `private source downloads are workspace and user bound...`; `review history and audit list/export remain isolated...` (cross-workspace signed link, tampered/expired token, nosniff, quarantine recheck) |
+| `POST /api/files/:fileId/scan` | `review history and audit list/export remain isolated...` (foreign file is 404); `bad text...` exercises scanner refusal; route also requires manager role and recent auth |
+| `GET /api/workspace/audit` | `review history and audit list/export remain isolated across workspaces` (workspace B cannot list A events) |
+| `GET /api/workspace/audit/export` | `review history and audit list/export remain isolated across workspaces` (workspace B export contains no A identifiers) |
 
-All state-changing routes are non-GET methods and are covered by the global CSRF middleware test. The Phase 2 upload suite also covers malformed UTF-8, binary/NUL bytes, oversize and multiple files, traversal-style names, quarantine, source expiry, retained versions, and collection allowlist behavior. This matrix records route-family and negative tenant-boundary coverage; it is not exhaustive fuzzing or a penetration test.
+Routes that create records (`POST /api/reviews`, `POST /api/sources`, invitation creation) have no foreign object identifier to probe; tests verify records are created in the authenticated workspace. Account-only authentication routes also do not accept a foreign workspace object except login/invitation/session identifiers, which are covered by the named tests above. No tenant-addressable route is currently listed without a cross-workspace negative test. All state-changing routes are non-GET methods and are covered by the global CSRF middleware test. The upload suite covers malformed UTF-8, binary/NUL bytes, oversize and multiple files, traversal-style names, quarantine, source expiry, retained versions, and collection allowlist behavior. This matrix is test coverage documentation, not exhaustive fuzzing or a penetration test.

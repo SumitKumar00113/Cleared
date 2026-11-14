@@ -10,6 +10,7 @@ import { verificationRouter } from './services/verification.js';
 import { workspaceRouter } from './services/workspace.js';
 import { filesRouter } from './services/files.js';
 import { encryptionKey } from './services/mfa.js';
+import { recordAuditEvent } from './services/store.js';
 
 const rootEnv = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../.env');
 try {
@@ -64,6 +65,21 @@ export function createApp() {
   app.get('/api/health', (_request, response) => response.json({ status: 'ok', service: 'cleared-api' }));
   app.use('/api/auth', authRouter);
   app.use('/api', requireWorkspaceAuth);
+  app.use('/api', (request,response,next)=>{
+    response.on('finish',()=>{
+      const path=request.path, method=request.method;
+      let action=`api.${method.toLowerCase()}`;
+      if(path.startsWith('/verification/check/'))action='verification.run';
+      else if(path.startsWith('/workspace/invitations'))action='invitation.created';
+      else if(path.startsWith('/workspace/members/')&&method==='PATCH')action='member.role_changed';
+      else if(path.startsWith('/workspace/members/')&&method==='DELETE')action='member.removed';
+      else if(path.startsWith('/auth/mfa/'))action='mfa.changed';
+      else if(/^\/files\/[^/]+\/download$/.test(path))action='file.download';
+      const routeTarget=response.statusCode>=400?request.route?.path||path.replace(/\/[^/]+/g,'/:id'):request.route?.path||path;
+      recordAuditEvent({workspaceId:request.user.workspaceId,actorId:request.user.userId,action:response.statusCode>=400?'api.route_access_denied':action,targetType:'route',targetId:routeTarget,requestOrigin:request.get('origin')||request.get('referer')||null,details:{method,status:response.statusCode}});
+    });
+    next();
+  });
   app.use('/api/files', filesRouter);
   app.use('/api/workspace', workspaceRouter);
   app.use('/api/reviews', reviewsRouter);

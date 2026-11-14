@@ -48,10 +48,10 @@ filesRouter.post('/:fileId/scan', requireRole(['owner','administrator','brand_ma
   try {
     const bytes = await getFileStorage().get(file.storageKey);
     const result = await scanUpload(bytes);
-    updateStoredFileScan(request.user.workspaceId, file.id, request.user.userId, result.status, result.engine, result.detail || '');
+    updateStoredFileScan(request.user.workspaceId, file.id, request.user.userId, result.status, result.engine, result.detail || '',request.get('origin')||request.get('referer')||null);
     return response.json({ data: { fileId: file.id, scanStatus: result.status, scanner: result.engine } });
   } catch (error) {
-    updateStoredFileScan(request.user.workspaceId, file.id, request.user.userId, 'quarantined', 'unavailable', error.message);
+    updateStoredFileScan(request.user.workspaceId, file.id, request.user.userId, 'quarantined', 'unavailable', error.message,request.get('origin')||request.get('referer')||null);
     return response.status(503).json({ error: 'A configured file scanner is required before this file can be marked clean.' });
   }
 });
@@ -61,7 +61,7 @@ filesRouter.get('/:fileId/download', async (request, response, next) => {
     const file = getStoredFile(request.user.workspaceId, request.params.fileId);
     if (!validToken(request.query.token, request.params.fileId, request) || !mayOpen(file, request)) return response.status(404).json({ error: 'File not found or unavailable.' });
     const bytes = await getFileStorage().get(file.storageKey);
-    recordFileAction({ workspaceId: request.user.workspaceId, fileId: file.id, actorId: request.user.userId, action: 'download', details: { checksum: file.checksum } });
+    recordFileAction({ workspaceId: request.user.workspaceId, fileId: file.id, actorId: request.user.userId, action: 'download', details: { checksum: file.checksum },requestOrigin:request.get('origin')||request.get('referer')||null });
     const safeName = file.originalName.replace(/[\r\n\0"\\/]/g, '_').slice(0, 180) || 'download.txt';
     response.setHeader('Content-Type', file.contentType);
     response.setHeader('Content-Disposition', `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`);

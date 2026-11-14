@@ -304,6 +304,31 @@ test('every workspace API family keeps cross-workspace identifiers isolated', as
   assert.equal(noTokenAccept.status, 400);
 });
 
+test('review revisions are attributed and approvals bind the selected revision with separation of duties', async () => {
+  store.changeMemberRole(ownerA.workspace.id,memberA.userId,'reviewer');
+  const memberCookie=await login(memberA.email,'LongAndUniquePassword_M!2026',ownerA.workspace.id);
+  const memberCsrf=await get('/api/auth/csrf',memberCookie);
+  const review={id:'revision-approval-test',workspaceId:ownerA.workspace.id,title:'Revision-bound decision',content:'Original wording',status:'In review',ownerId:memberA.userId,owner:memberA.email,date:new Date().toISOString(),findings:0};
+  store.saveReview(ownerA.workspace.id,review,memberA.userId);
+  const ownDecision=await write(`/api/reviews/${review.id}`,memberCsrf.jar,memberCsrf.data.token,'PATCH',JSON.stringify({status:'Approved'}),{'Content-Type':'application/json'});
+  assert.equal(ownDecision.status,403);
+  const edited=await write(`/api/reviews/${review.id}`,jarA,csrfA,'PATCH',JSON.stringify({content:'Revised wording'}),{'Content-Type':'application/json'});
+  assert.equal(edited.status,200);
+  assert.equal(edited.data.data.revision,2);
+  const approved=await write(`/api/reviews/${review.id}`,jarA,csrfA,'PATCH',JSON.stringify({status:'Approved'}),{'Content-Type':'application/json'});
+  assert.equal(approved.status,200);
+  const history=await get(`/api/reviews/${review.id}/history`,jarB);
+  assert.equal(history.status,404);
+  const visible=await get(`/api/reviews/${review.id}/history`,jarA);
+  assert.equal(visible.status,200);
+  assert.deepEqual(visible.data.data.decisions.map((item)=>[item.decision,item.revision]),[['Approved',2]]);
+  assert.equal(visible.data.data.revisions[1].editor,ownerA.user.email);
+  const dbCheck=new DatabaseSync(process.env.CLEARED_DB_PATH);
+  assert.equal(dbCheck.prepare('SELECT locked FROM review_revisions WHERE review_id=? AND revision=2').get(review.id).locked,1);
+  assert.throws(()=>dbCheck.prepare('DELETE FROM audit_events WHERE target_id=?').run(review.id),/append-only/);
+  dbCheck.close();
+});
+
 test('password reset is generic, hashed, expiring, single-use, revokes sessions, and clears lockout', async () => {
   const resetStateDb=new DatabaseSync(process.env.CLEARED_DB_PATH); const resetAccountHash=createHash('sha256').update('owner-b@test.example').digest('hex'); const resetIpHash=createHash('sha256').update('127.0.0.1').digest('hex'); resetStateDb.prepare('DELETE FROM auth_attempts WHERE bucket=?').run(`pair:${resetAccountHash}:${resetIpHash}`); resetStateDb.prepare('DELETE FROM request_limits').run(); resetStateDb.close();
   async function requestReset(email) {
@@ -521,6 +546,29 @@ test('source versions are retained and expired latest sources are excluded from 
     assert.equal(result.status, 409);
     assert.match(result.data.error, /approved source/i);
   } finally { delete process.env.GEMINI_API_KEY; }
+});
+
+test('review history and audit list/export remain isolated across workspaces', async () => {
+  const versions=store.getSourceVersionRows(ownerA.workspace.id,phase2SourceId);
+  const foreignFileId=versions[0].fileId;
+  assert.equal((await get('/api/sources/collections/Policies/access',jarB)).data.data.allowedRoles,null);
+  assert.equal((await write('/api/sources/collections/Policies/access',jarB,csrfB,'PUT',JSON.stringify({allowedRoles:[],allowedUserIds:[memberA.userId]}),{'Content-Type':'application/json'})).status,400);
+  assert.equal((await get('/api/reviews/review-a/history',jarB)).status,404);
+  assert.equal((await get(`/api/sources/${phase2SourceId}/versions`,jarB)).status,404);
+  assert.equal((await write(`/api/sources/${phase2SourceId}/versions`,jarB,csrfB,'POST',uploadForm('x.txt','malicious tenant probe'))).status,404);
+  assert.equal((await write(`/api/files/${foreignFileId}/link`,jarB,csrfB,'POST')).status,404);
+  assert.equal((await write(`/api/files/${foreignFileId}/scan`,jarB,csrfB,'POST')).status,404);
+  const ownerLink=await write(`/api/files/${foreignFileId}/link`,jarA,csrfA,'POST');
+  assert.equal(ownerLink.status,200);
+  assert.equal((await fetch(new URL(ownerLink.data.data.url,base),{headers:{Cookie:jarB}})).status,404);
+  const list=await get('/api/workspace/audit',jarB);
+  assert.equal(list.status,200);
+  assert.equal(list.data.data.some((event)=>event.targetId==='review-a'||event.targetId===phase2SourceId||event.targetId===foreignFileId),false);
+  const exported=await get('/api/workspace/audit/export',jarB);
+  assert.equal(exported.status,200);
+  assert.equal(exported.headers.get('content-type').includes('text/csv'),true);
+  const csv=await fetch(`${base}/api/workspace/audit/export`,{headers:{Cookie:jarB}}).then((response)=>response.text());
+  assert.doesNotMatch(csv,/review-a|source-a/);
 });
 
 test('bad text, multiple files, oversized files, and quarantined files are rejected safely', async () => {

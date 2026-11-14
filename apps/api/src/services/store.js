@@ -9,6 +9,15 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(here, '../../data');
 mkdirSync(dataDir, { recursive: true });
 const db = new DatabaseSync(process.env.CLEARED_DB_PATH || path.join(dataDir, 'cleared.sqlite'));
+const phase3Migration = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_events'").get();
+if (!phase3Migration) {
+  const databasePath=db.location();
+  if (databasePath && databasePath !== ':memory:') {
+    const backupPath = `${databasePath}.phase3-${new Date().toISOString().replace(/[:.]/g, '-')}.bak.sqlite`;
+    db.exec(`VACUUM INTO '${backupPath.replace(/'/g, "''")}'`);
+    console.info(`[migration] SQLite backup created at ${backupPath}`);
+  }
+}
 const scryptAsync = promisify(scrypt);
 const SCRYPT_CONCURRENCY = 2;
 const SCRYPT_MAXMEM = 160 * 1024 * 1024;
@@ -33,10 +42,8 @@ CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, workspace_id TEXT NOT N
 CREATE TABLE IF NOT EXISTS stored_files (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), owner_id TEXT NOT NULL REFERENCES users(id), uploader_id TEXT NOT NULL REFERENCES users(id), purpose TEXT NOT NULL CHECK(purpose IN ('review','source')), resource_id TEXT NOT NULL, original_name TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, checksum TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, scan_status TEXT NOT NULL DEFAULT 'quarantined' CHECK(scan_status IN ('quarantined','clean','rejected')), scan_engine TEXT, uploaded_at TEXT NOT NULL, deleted_at TEXT);
 CREATE TABLE IF NOT EXISTS source_versions (source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, version INTEGER NOT NULL, file_id TEXT REFERENCES stored_files(id), owner_id TEXT NOT NULL REFERENCES users(id), uploader_id TEXT NOT NULL REFERENCES users(id), checksum TEXT NOT NULL, uploaded_at TEXT NOT NULL, expires_at TEXT, PRIMARY KEY(source_id,version));
 CREATE TABLE IF NOT EXISTS collection_access (workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, category TEXT NOT NULL, allowed_roles TEXT NOT NULL, allowed_user_ids TEXT NOT NULL, updated_by TEXT NOT NULL REFERENCES users(id), updated_at TEXT NOT NULL, PRIMARY KEY(workspace_id,category));
-CREATE TABLE IF NOT EXISTS file_action_events (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), file_id TEXT NOT NULL, actor_id TEXT NOT NULL REFERENCES users(id), action TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS stored_files_workspace ON stored_files(workspace_id, id);
 CREATE INDEX IF NOT EXISTS source_versions_file ON source_versions(file_id);
-CREATE INDEX IF NOT EXISTS file_action_events_workspace ON file_action_events(workspace_id, created_at);
 CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, expires_at TEXT NOT NULL, user_agent TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_used_at TEXT NOT NULL, revoked_at TEXT, mfa_verified INTEGER NOT NULL DEFAULT 0, mfa_verified_at TEXT, recent_auth_at TEXT);
 CREATE INDEX IF NOT EXISTS sessions_user_active ON sessions(user_id, expires_at) WHERE revoked_at IS NULL;
 CREATE TABLE IF NOT EXISTS auth_attempts (bucket TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, window_started_at INTEGER NOT NULL, locked_until INTEGER NOT NULL DEFAULT 0);
@@ -74,7 +81,8 @@ if (!sessionColumns.has('recent_auth_at')) db.exec('ALTER TABLE sessions ADD COL
 
 const now = () => new Date().toISOString();
 // Preserve pre-Phase-2 source metadata as a quarantined metadata-only first version.
-for (const row of db.prepare('SELECT id,workspace_id AS workspaceId,data FROM sources').all()) {
+const sourceColumnsAtStartup=new Set(db.prepare('PRAGMA table_info(sources)').all().map((column)=>column.name));
+for (const row of (sourceColumnsAtStartup.has('data')?db.prepare('SELECT id,workspace_id AS workspaceId,data FROM sources').all():[])) {
   const source = JSON.parse(row.data);
   if (db.prepare('SELECT 1 FROM source_versions WHERE source_id=? LIMIT 1').get(row.id)) continue;
   const ownerId = source.ownerId || db.prepare('SELECT u.id FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.workspace_id=? AND lower(u.email)=lower(?)').get(row.workspaceId, source.owner)?.id;
@@ -83,6 +91,76 @@ for (const row of db.prepare('SELECT id,workspace_id AS workspaceId,data FROM so
   const checksum = createHash('sha256').update(String(source.text || '')).digest('hex');
   db.prepare('INSERT INTO source_versions(source_id,workspace_id,version,file_id,owner_id,uploader_id,checksum,uploaded_at,expires_at) VALUES(?,?,?,NULL,?,?,?,?,?)').run(row.id,row.workspaceId,source.version || 1,ownerId,uploaderId,checksum,source.uploadedAt || source.updated || now(),source.expiresAt || null);
 }
+
+// Phase 3 schema conversion. A standalone SQLite snapshot is taken before any
+// existing database is changed. The conversion keeps its old rows available
+// for the down migration and converts them into workspace-scoped relations.
+if (!phase3Migration) {
+  db.exec(`BEGIN IMMEDIATE;
+    DROP INDEX IF EXISTS reviews_workspace;
+    DROP INDEX IF EXISTS sources_workspace;
+    DROP INDEX IF EXISTS source_versions_file;
+    ALTER TABLE reviews RENAME TO reviews_legacy_phase3;
+    ALTER TABLE sources RENAME TO sources_legacy_phase3;
+    CREATE TABLE reviews(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),title TEXT NOT NULL,owner_id TEXT NOT NULL REFERENCES users(id),owner_email TEXT NOT NULL,team TEXT NOT NULL DEFAULT 'Unassigned',status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,current_revision_id TEXT REFERENCES review_revisions(id) DEFERRABLE INITIALLY DEFERRED,file_id TEXT,file_name TEXT,findings_count INTEGER NOT NULL DEFAULT 0,verified_at TEXT);
+    CREATE TABLE review_revisions(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,revision INTEGER NOT NULL,content TEXT NOT NULL,content_hash TEXT NOT NULL,editor_id TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,locked INTEGER NOT NULL DEFAULT 0,UNIQUE(review_id,revision));
+    CREATE TABLE claims(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,revision_id TEXT NOT NULL REFERENCES review_revisions(id) ON DELETE CASCADE,claim_text TEXT NOT NULL,verdict TEXT NOT NULL,source_id TEXT,source_version INTEGER,source_name TEXT,evidence TEXT,explanation TEXT,created_at TEXT NOT NULL);
+    CREATE TABLE findings(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,revision_id TEXT NOT NULL REFERENCES review_revisions(id) ON DELETE CASCADE,claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,source_id TEXT,source_version INTEGER,created_at TEXT NOT NULL);
+    CREATE TABLE decisions(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,revision_id TEXT NOT NULL REFERENCES review_revisions(id),actor_id TEXT NOT NULL REFERENCES users(id),decision TEXT NOT NULL CHECK(decision IN ('Approved','Rejected','Needs changes')),created_at TEXT NOT NULL);
+    CREATE TABLE sources(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),name TEXT NOT NULL,category TEXT NOT NULL,owner_id TEXT NOT NULL REFERENCES users(id),owner_email TEXT NOT NULL,uploader_id TEXT NOT NULL REFERENCES users(id),uploader_email TEXT NOT NULL,type TEXT NOT NULL DEFAULT '',file_name TEXT NOT NULL DEFAULT '',size INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,deleted_at TEXT);
+    ALTER TABLE source_versions RENAME TO source_versions_legacy_phase3;
+    CREATE TABLE source_versions(source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,version INTEGER NOT NULL,file_id TEXT REFERENCES stored_files(id),owner_id TEXT NOT NULL REFERENCES users(id),uploader_id TEXT NOT NULL REFERENCES users(id),checksum TEXT NOT NULL,uploaded_at TEXT NOT NULL,expires_at TEXT,scan_status TEXT NOT NULL DEFAULT 'quarantined' CHECK(scan_status IN ('quarantined','clean','rejected')),PRIMARY KEY(source_id,version));
+    CREATE TABLE source_passages(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),source_id TEXT NOT NULL,version INTEGER NOT NULL,passage_number INTEGER NOT NULL,text TEXT NOT NULL,content_hash TEXT NOT NULL,FOREIGN KEY(source_id,version) REFERENCES source_versions(source_id,version) ON DELETE CASCADE);
+    CREATE TABLE audit_events(id TEXT PRIMARY KEY,workspace_id TEXT REFERENCES workspaces(id),actor_id TEXT REFERENCES users(id),action TEXT NOT NULL,target_type TEXT NOT NULL,target_id TEXT,occurred_at TEXT NOT NULL,request_origin TEXT,details TEXT NOT NULL DEFAULT '{}');
+    CREATE INDEX reviews_workspace ON reviews(workspace_id,created_at);
+    CREATE INDEX review_revisions_workspace ON review_revisions(workspace_id,review_id,revision);
+    CREATE INDEX claims_workspace ON claims(workspace_id,review_id,revision_id);
+    CREATE INDEX findings_workspace ON findings(workspace_id,review_id,revision_id);
+    CREATE INDEX decisions_workspace ON decisions(workspace_id,review_id,created_at);
+    CREATE INDEX sources_workspace ON sources(workspace_id,updated_at);
+    CREATE INDEX source_versions_file ON source_versions(workspace_id,file_id);
+    CREATE INDEX source_passages_workspace ON source_passages(workspace_id,source_id,version);
+    CREATE INDEX audit_events_workspace ON audit_events(workspace_id,occurred_at,id);
+    CREATE TRIGGER audit_events_no_update BEFORE UPDATE ON audit_events BEGIN SELECT RAISE(ABORT,'audit_events is append-only'); END;
+    CREATE TRIGGER audit_events_no_delete BEFORE DELETE ON audit_events BEGIN SELECT RAISE(ABORT,'audit_events is append-only'); END;
+  `);
+  for (const row of db.prepare('SELECT id,workspace_id AS workspaceId,data FROM reviews_legacy_phase3').all()) {
+    const review = JSON.parse(row.data), at = review.date || now(), editor = review.ownerId;
+    if (!editor || !db.prepare('SELECT 1 FROM users WHERE id=?').get(editor)) continue;
+    const revisionId = randomUUID(), content = String(review.content || ''), contentHash = createHash('sha256').update(content).digest('hex');
+    db.prepare('INSERT INTO reviews(id,workspace_id,title,owner_id,owner_email,team,status,created_at,updated_at,current_revision_id,file_id,file_name,findings_count,verified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(review.id,row.workspaceId,review.title || '(untitled)',editor,review.owner || '',review.team || 'Unassigned',review.status || 'In review',at,review.updatedAt || at,revisionId,review.fileId || null,review.fileName || null,Number(review.findings || 0),review.verifiedAt || null);
+    db.prepare('INSERT INTO review_revisions(id,workspace_id,review_id,revision,content,content_hash,editor_id,created_at,locked) VALUES(?,?,?,?,?,?,?,?,0)').run(revisionId,row.workspaceId,review.id,1,content,contentHash,editor,at);
+    const auditId = randomUUID(); db.prepare('INSERT INTO audit_events(id,workspace_id,actor_id,action,target_type,target_id,occurred_at,details) VALUES(?,?,?,?,?,?,?,?)').run(auditId,row.workspaceId,editor,'review.submitted','review',review.id,at,JSON.stringify({revision:1}));
+    for (const claim of review.claimResults || []) {
+      const claimId = randomUUID();
+      db.prepare('INSERT INTO claims(id,workspace_id,review_id,revision_id,claim_text,verdict,source_id,source_version,source_name,evidence,explanation,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(claimId,row.workspaceId,review.id,revisionId,String(claim.claim || ''),claim.verdict || 'Not enough evidence',claim.sourceId || null,claim.sourceVersion || null,claim.sourceName || null,claim.evidence || null,claim.explanation || '',review.verifiedAt || at);
+      if (claim.verdict !== 'Supported') db.prepare('INSERT INTO findings(id,workspace_id,review_id,revision_id,claim_id,source_id,source_version,created_at) VALUES(?,?,?,?,?,?,?,?)').run(randomUUID(),row.workspaceId,review.id,revisionId,claimId,claim.sourceId || null,claim.sourceVersion || null,review.verifiedAt || at);
+    }
+  }
+  for (const row of db.prepare('SELECT id,workspace_id AS workspaceId,data FROM sources_legacy_phase3').all()) {
+    const source = JSON.parse(row.data), owner = source.ownerId || source.uploaderId || db.prepare("SELECT user_id FROM memberships WHERE workspace_id=? ORDER BY role='owner' DESC LIMIT 1").get(row.workspaceId)?.user_id;
+    if (!owner) continue;
+    const uploader = source.uploaderId || owner, uploadedAt = source.uploadedAt || source.updated || now();
+    const email = (id) => db.prepare('SELECT email FROM users WHERE id=?').get(id)?.email || '';
+    db.prepare('INSERT INTO sources(id,workspace_id,name,category,owner_id,owner_email,uploader_id,uploader_email,type,file_name,size,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(row.id,row.workspaceId,source.name || '(legacy source)',source.category || 'General',owner,email(owner),uploader,email(uploader),source.type || '',source.fileName || '',Number(source.size || 0),uploadedAt);
+    const versions = db.prepare('SELECT * FROM source_versions_legacy_phase3 WHERE source_id=? ORDER BY version').all(row.id);
+    for (const version of versions) db.prepare('INSERT INTO source_versions(source_id,workspace_id,version,file_id,owner_id,uploader_id,checksum,uploaded_at,expires_at,scan_status) VALUES(?,?,?,?,?,?,?,?,? ,?)').run(version.source_id,version.workspace_id,version.version,version.file_id,version.owner_id,version.uploader_id,version.checksum,version.uploaded_at,version.expires_at,'quarantined');
+    if (!versions.length) {
+      const checksum=createHash('sha256').update(String(source.text || '')).digest('hex');
+      db.prepare('INSERT INTO source_versions(source_id,workspace_id,version,file_id,owner_id,uploader_id,checksum,uploaded_at,expires_at,scan_status) VALUES(?,?,1,NULL,?,?,?,?,? ,?)').run(row.id,row.workspaceId,owner,uploader,checksum,uploadedAt,source.expiresAt || null,'quarantined');
+    }
+    if (source.text) {
+      const version = versions.at(-1)?.version || 1;
+      const passages = String(source.text).split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+      passages.forEach((text,index)=>db.prepare('INSERT INTO source_passages(id,workspace_id,source_id,version,passage_number,text,content_hash) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),row.workspaceId,row.id,version,index+1,text,createHash('sha256').update(text).digest('hex')));
+    }
+  }
+  if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_action_events'").get()){
+    for (const event of db.prepare('SELECT * FROM file_action_events').all()) db.prepare('INSERT INTO audit_events(id,workspace_id,actor_id,action,target_type,target_id,occurred_at,details) VALUES(?,?,?,?,?,?,?,?)').run(event.id,event.workspace_id,event.actor_id,`file.${event.action}`,'file',event.file_id,event.created_at,event.details);
+    db.exec('DROP TABLE file_action_events;');
+  }
+  db.exec('COMMIT');
+} else db.exec('DROP TABLE IF EXISTS file_action_events; DROP INDEX IF EXISTS file_action_events_workspace;');
 function transaction(callback) {
   db.exec('BEGIN IMMEDIATE');
   try { const result = callback(); db.exec('COMMIT'); return result; }
@@ -222,7 +300,7 @@ export function completeMfaChallenge(token, { step = null, recoveryHash = null }
     return { userId: row.user_id, workspaceId: row.workspace_id, workspaceName: row.workspaceName, email: row.email, emailVerified: true, mfaEnabled: true, mfaVerified: true, userAgent: row.user_agent };
   });
 }
-export function deleteSource(workspaceId, sourceId) { return db.prepare('DELETE FROM sources WHERE workspace_id=? AND id=?').run(workspaceId, sourceId).changes > 0; }
+export function deleteSource(workspaceId, sourceId, actorId = null, requestOrigin = null) { const changed=db.prepare('DELETE FROM sources WHERE workspace_id=? AND id=?').run(workspaceId, sourceId).changes > 0; if(changed)recordAuditEvent({workspaceId,actorId,action:'source.deleted',targetType:'source',targetId:sourceId,requestOrigin}); return changed; }
 export function createInvitation({ workspaceId, email, role, createdBy }) {
   const token = randomBytes(32).toString('base64url');
   const invitation = { id: randomUUID(), email: email.trim().toLowerCase(), role, token, expiresAt: new Date(Date.now() + 7 * 86400000).toISOString() };
@@ -347,33 +425,100 @@ export function removeMember(workspaceId, userId) {
     return removed;
   });
 }
-export function saveReview(workspaceId, record) { db.prepare('INSERT OR REPLACE INTO reviews(id,workspace_id,data) VALUES(?,?,?)').run(record.id, workspaceId, JSON.stringify(record)); }
-export function getReviews(workspaceId) { return db.prepare('SELECT data FROM reviews WHERE workspace_id=? ORDER BY rowid DESC').all(workspaceId).map((row) => JSON.parse(row.data)); }
-export function getReview(workspaceId, id) { const row = db.prepare('SELECT data FROM reviews WHERE workspace_id=? AND id=?').get(workspaceId, id); return row ? JSON.parse(row.data) : null; }
-export function saveSource(workspaceId, record) { db.prepare('INSERT OR REPLACE INTO sources(id,workspace_id,data) VALUES(?,?,?)').run(record.id, workspaceId, JSON.stringify(record)); }
-export function getSource(workspaceId, sourceId) { const row = db.prepare('SELECT data FROM sources WHERE workspace_id=? AND id=?').get(workspaceId, sourceId); return row ? JSON.parse(row.data) : null; }
+export function recordAuditEvent({ workspaceId = null, actorId = null, action, targetType, targetId = null, occurredAt = now(), requestOrigin = null, details = {} }) {
+  db.prepare('INSERT INTO audit_events(id,workspace_id,actor_id,action,target_type,target_id,occurred_at,request_origin,details) VALUES(?,?,?,?,?,?,?,?,?)').run(randomUUID(),workspaceId,actorId,action,targetType,targetId,occurredAt,requestOrigin,JSON.stringify(details));
+}
+export function listAuditEvents(workspaceId, { limit = 500, before = null } = {}) {
+  const cap=Math.max(1,Math.min(1000,Number(limit)||500));
+  return db.prepare(`SELECT e.id,e.workspace_id AS workspaceId,e.actor_id AS actorId,u.email AS actorEmail,e.action,e.target_type AS targetType,e.target_id AS targetId,e.occurred_at AS occurredAt,e.request_origin AS requestOrigin,e.details
+    FROM audit_events e LEFT JOIN users u ON u.id=e.actor_id WHERE e.workspace_id=? AND (? IS NULL OR e.occurred_at<?) ORDER BY e.occurred_at DESC,e.id DESC LIMIT ?`).all(workspaceId,before,before,cap).map((row)=>({...row,details:JSON.parse(row.details)}));
+}
+export function reviewHistory(workspaceId, reviewId) {
+  if (!db.prepare('SELECT 1 FROM reviews WHERE workspace_id=? AND id=?').get(workspaceId,reviewId)) return null;
+  const revisions=db.prepare('SELECT v.id,v.revision,v.content_hash AS contentHash,v.created_at AS createdAt,u.email AS editor FROM review_revisions v JOIN users u ON u.id=v.editor_id WHERE v.workspace_id=? AND v.review_id=? ORDER BY v.revision').all(workspaceId,reviewId);
+  const events=listAuditEvents(workspaceId,{limit:1000}).filter((event)=>event.targetType==='review'&&event.targetId===reviewId);
+  const decisions=db.prepare('SELECT d.decision,d.revision_id AS revisionId,v.revision,d.created_at AS createdAt,d.actor_id AS actorId,u.email AS actor FROM decisions d JOIN users u ON u.id=d.actor_id JOIN review_revisions v ON v.id=d.revision_id WHERE d.workspace_id=? AND d.review_id=? ORDER BY d.created_at').all(workspaceId,reviewId);
+  return { events, revisions, decisions };
+}
+const reviewSelect = `SELECT r.*,v.content,v.revision,v.content_hash AS contentHash FROM reviews r LEFT JOIN review_revisions v ON v.id=r.current_revision_id`;
+function shapeReview(row) {
+  if (!row) return null;
+  const claimResults = db.prepare('SELECT c.claim_text AS claim,c.verdict,c.source_id AS sourceId,c.source_version AS sourceVersion,c.source_name AS sourceName,c.evidence,c.explanation FROM claims c WHERE c.review_id=? AND c.revision_id=? ORDER BY c.rowid').all(row.id,row.current_revision_id);
+  const { id,workspace_id:workspaceId,title,content,file_id:fileId,file_name:fileName,owner_email:owner,owner_id:ownerId,team,status,created_at:date,updated_at:updatedAt,findings_count:findings,verified_at:verifiedAt,revision,contentHash } = row;
+  return { id,workspaceId,title,content:content || '',fileId,fileName,owner,ownerId,team,status,date,updatedAt,findings,verifiedAt,revision:revision || 1,contentHash,claimResults };
+}
+export function saveReview(workspaceId, record, actorId = record.ownerId, requestOrigin = null, { recordDecision = true } = {}) {
+  const previous = getReview(workspaceId,record.id);
+  const actor = actorId && db.prepare('SELECT 1 FROM users WHERE id=?').get(actorId) ? actorId : record.ownerId || db.prepare("SELECT user_id FROM memberships WHERE workspace_id=? ORDER BY role='owner' DESC LIMIT 1").get(workspaceId)?.user_id;
+  if (!actor) throw new Error('Review actor is required.');
+  const at=now(), content=String(record.content || ''), changed=!previous || previous.content !== content;
+  const currentRevision = db.prepare('SELECT revision,locked FROM review_revisions WHERE id=(SELECT current_revision_id FROM reviews WHERE workspace_id=? AND id=?)').get(workspaceId,record.id);
+  const revisionNumber=changed ? (currentRevision?.revision || 0)+1 : (currentRevision?.revision || 1);
+  const revisionId=changed ? randomUUID() : db.prepare('SELECT current_revision_id FROM reviews WHERE workspace_id=? AND id=?').get(workspaceId,record.id)?.current_revision_id;
+  const hash=createHash('sha256').update(content).digest('hex');
+  const status=(changed&&previous&&['Approved','Rejected'].includes(previous.status)&&record.status===previous.status)?'In review':(record.status||previous?.status||'In review');
+  transaction(()=>{
+    db.prepare(`INSERT INTO reviews(id,workspace_id,title,owner_id,owner_email,team,status,created_at,updated_at,current_revision_id,file_id,file_name,findings_count,verified_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,team=excluded.team,status=excluded.status,updated_at=excluded.updated_at,current_revision_id=excluded.current_revision_id,file_id=excluded.file_id,file_name=excluded.file_name,findings_count=excluded.findings_count,verified_at=excluded.verified_at`)
+      .run(record.id,workspaceId,record.title || previous?.title || '(untitled)',record.ownerId || previous?.ownerId || actor,record.owner || previous?.owner || '',record.team || previous?.team || 'Unassigned',status,previous?.date || record.date || at,at,revisionId,record.fileId || previous?.fileId || null,record.fileName || previous?.fileName || null,Number(record.findings || 0),record.verifiedAt || null);
+    if (changed) {
+      db.prepare('INSERT INTO review_revisions(id,workspace_id,review_id,revision,content,content_hash,editor_id,created_at,locked) VALUES(?,?,?,?,?,?,?,?,0)').run(revisionId,workspaceId,record.id,revisionNumber,content,hash,actor,at);
+      const action=previous?'review.revised':'review.submitted';
+      recordAuditEvent({workspaceId,actorId:actor,action,targetType:'review',targetId:record.id,occurredAt:at,requestOrigin,details:{revision:revisionNumber,contentHash:hash}});
+    }
+    const oldStatus=previous?.status;
+    if (recordDecision && status && status!==oldStatus && ['Approved','Rejected','Needs changes'].includes(status)) {
+      if (record.ownerId===actor) throw Object.assign(new Error('Review authors cannot make decisions on their own submission.'),{status:403});
+      if (currentRevision) db.prepare('UPDATE review_revisions SET locked=1 WHERE id=?').run(previous ? db.prepare('SELECT current_revision_id FROM reviews WHERE id=?').get(record.id).current_revision_id : revisionId);
+      db.prepare('INSERT INTO decisions(id,workspace_id,review_id,revision_id,actor_id,decision,created_at) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),workspaceId,record.id,revisionId,actor,status,at);
+      recordAuditEvent({workspaceId,actorId:actor,action:`review.${status.toLowerCase().replaceAll(' ','_')}`,targetType:'review',targetId:record.id,occurredAt:at,requestOrigin,details:{revision:revisionNumber}});
+    } else if (status && status!==oldStatus) {
+      recordAuditEvent({workspaceId,actorId:actor,action:'review.status_changed',targetType:'review',targetId:record.id,occurredAt:at,requestOrigin,details:{from:oldStatus,to:status}});
+    }
+    db.prepare('DELETE FROM claims WHERE review_id=? AND revision_id=?').run(record.id,revisionId);
+    for (const item of record.claimResults || []) {
+      const claimId=randomUUID();
+      db.prepare('INSERT INTO claims(id,workspace_id,review_id,revision_id,claim_text,verdict,source_id,source_version,source_name,evidence,explanation,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(claimId,workspaceId,record.id,revisionId,String(item.claim || ''),item.verdict || 'Not enough evidence',item.sourceId || null,item.sourceVersion || null,item.sourceName || null,item.evidence || null,item.explanation || '',at);
+      if (item.verdict!=='Supported') db.prepare('INSERT INTO findings(id,workspace_id,review_id,revision_id,claim_id,source_id,source_version,created_at) VALUES(?,?,?,?,?,?,?,?)').run(randomUUID(),workspaceId,record.id,revisionId,claimId,item.sourceId||null,item.sourceVersion||null,at);
+    }
+  });
+}
+export function getReviews(workspaceId) { return db.prepare(`${reviewSelect} WHERE r.workspace_id=? ORDER BY r.created_at DESC`).all(workspaceId).map(shapeReview); }
+export function getReview(workspaceId, id) { return shapeReview(db.prepare(`${reviewSelect} WHERE r.workspace_id=? AND r.id=?`).get(workspaceId,id)); }
+export function saveSource(workspaceId, record) {
+  const ownerId=record.ownerId || record.uploaderId || db.prepare("SELECT user_id FROM memberships WHERE workspace_id=? ORDER BY role='owner' DESC LIMIT 1").get(workspaceId)?.user_id;
+  if (!ownerId) throw new Error('Source owner is required.');
+  const userEmail=(id)=>db.prepare('SELECT email FROM users WHERE id=?').get(id)?.email || '';
+  db.prepare(`INSERT INTO sources(id,workspace_id,name,category,owner_id,owner_email,uploader_id,uploader_email,type,file_name,size,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,category=excluded.category,type=excluded.type,file_name=excluded.file_name,size=excluded.size,updated_at=excluded.updated_at`)
+    .run(record.id,workspaceId,record.name || '',record.category || 'General',ownerId,userEmail(ownerId),record.uploaderId || ownerId,userEmail(record.uploaderId || ownerId),record.type || '',record.fileName || '',Number(record.size || 0),record.updated || record.uploadedAt || now());
+}
+function shapeSource(row) { if(!row)return null; return {id:row.id,workspaceId:row.workspace_id,name:row.name,category:row.category,ownerId:row.owner_id,owner:row.owner_email,uploaderId:row.uploader_id,uploader:row.uploader_email,type:row.type,fileName:row.file_name,size:row.size,updated:row.updated_at}; }
+export function getSource(workspaceId, sourceId) { return shapeSource(db.prepare('SELECT * FROM sources WHERE workspace_id=? AND id=?').get(workspaceId,sourceId)); }
 export function getSources(workspaceId) {
-  return db.prepare('SELECT s.data,v.version,v.file_id AS fileId,v.checksum,v.uploaded_at AS uploadedAt,v.expires_at AS expiresAt,f.scan_status AS scanStatus FROM sources s LEFT JOIN source_versions v ON v.source_id=s.id AND v.version=(SELECT MAX(v2.version) FROM source_versions v2 WHERE v2.source_id=s.id) LEFT JOIN stored_files f ON f.id=v.file_id WHERE s.workspace_id=? ORDER BY s.rowid DESC').all(workspaceId).map((row) => {
-    const record = JSON.parse(row.data);
+  return db.prepare('SELECT s.*,v.version,v.file_id AS fileId,v.checksum,v.uploaded_at AS uploadedAt,v.expires_at AS expiresAt,COALESCE(f.scan_status,v.scan_status) AS scanStatus FROM sources s LEFT JOIN source_versions v ON v.source_id=s.id AND v.version=(SELECT MAX(v2.version) FROM source_versions v2 WHERE v2.source_id=s.id) LEFT JOIN stored_files f ON f.id=v.file_id WHERE s.workspace_id=? ORDER BY s.updated_at DESC').all(workspaceId).map((row) => {
+    const record = shapeSource(row);
     // Keep the legacy response field while ensuring uploaded source bytes are available only through authorized file links.
     return { ...record, text: '', ...(row.version ? { version: row.version, fileId: row.fileId, checksum: row.checksum, uploadedAt: row.uploadedAt, expiresAt: row.expiresAt, scanStatus: row.scanStatus || 'quarantined' } : { scanStatus: 'quarantined' }) };
   });
 }
 export function getSourceVersionRows(workspaceId, sourceId) {
-  return db.prepare('SELECT v.source_id AS sourceId,v.version,v.file_id AS fileId,v.owner_id AS ownerId,owner.email AS owner,v.uploader_id AS uploaderId,uploader.email AS uploader,v.checksum,v.uploaded_at AS uploadedAt,v.expires_at AS expiresAt,f.original_name AS fileName,f.content_type AS contentType,f.size,f.scan_status AS scanStatus FROM source_versions v JOIN users owner ON owner.id=v.owner_id JOIN users uploader ON uploader.id=v.uploader_id LEFT JOIN stored_files f ON f.id=v.file_id WHERE v.workspace_id=? AND v.source_id=? ORDER BY v.version DESC').all(workspaceId, sourceId);
+  return db.prepare('SELECT v.source_id AS sourceId,v.version,v.file_id AS fileId,v.owner_id AS ownerId,owner.email AS owner,v.uploader_id AS uploaderId,uploader.email AS uploader,v.checksum,v.uploaded_at AS uploadedAt,v.expires_at AS expiresAt,f.original_name AS fileName,f.content_type AS contentType,f.size,COALESCE(f.scan_status,v.scan_status) AS scanStatus FROM source_versions v JOIN users owner ON owner.id=v.owner_id JOIN users uploader ON uploader.id=v.uploader_id LEFT JOIN stored_files f ON f.id=v.file_id WHERE v.workspace_id=? AND v.source_id=? ORDER BY v.version DESC').all(workspaceId, sourceId);
 }
 export function saveSourceVersion(workspaceId, source, version) {
   transaction(() => {
-    db.prepare('INSERT INTO sources(id,workspace_id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id,data=excluded.data').run(source.id, workspaceId, JSON.stringify(source));
-    db.prepare('INSERT INTO source_versions(source_id,workspace_id,version,file_id,owner_id,uploader_id,checksum,uploaded_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?)').run(source.id, workspaceId, version.version, version.fileId, version.ownerId, version.uploaderId, version.checksum, version.uploadedAt, version.expiresAt || null);
+    saveSource(workspaceId,source);
+    db.prepare('INSERT INTO source_versions(source_id,workspace_id,version,file_id,owner_id,uploader_id,checksum,uploaded_at,expires_at,scan_status) VALUES(?,?,?,?,?,?,?,?,?,?)').run(source.id, workspaceId, version.version, version.fileId, version.ownerId, version.uploaderId, version.checksum, version.uploadedAt, version.expiresAt || null, version.scanStatus || 'quarantined');
+    recordAuditEvent({workspaceId,actorId:version.uploaderId,action:version.version>1?'source.new_version':'source.upload',targetType:'source',targetId:source.id,occurredAt:version.uploadedAt,requestOrigin:version.requestOrigin||null,details:{version:version.version,checksum:version.checksum}});
   });
 }
 export function getCurrentSourceFile(workspaceId, sourceId) {
-  return db.prepare('SELECT s.data,v.version,v.file_id AS fileId,v.owner_id AS ownerId,v.uploader_id AS uploaderId,v.checksum,v.uploaded_at AS uploadedAt,v.expires_at AS expiresAt,f.storage_key AS storageKey,f.original_name AS fileName,f.content_type AS contentType,f.size,f.scan_status AS scanStatus,f.purpose,f.id,f.workspace_id AS workspaceId,f.deleted_at AS deletedAt FROM sources s JOIN source_versions v ON v.source_id=s.id AND v.version=(SELECT MAX(v2.version) FROM source_versions v2 WHERE v2.source_id=s.id) JOIN stored_files f ON f.id=v.file_id WHERE s.workspace_id=? AND s.id=?').get(workspaceId, sourceId) || null;
+  const row=db.prepare('SELECT s.*,v.version,v.file_id AS fileId,v.owner_id AS ownerId,v.uploader_id AS uploaderId,v.checksum,v.uploaded_at AS uploadedAt,v.expires_at AS expiresAt,COALESCE(f.scan_status,v.scan_status) AS scanStatus,f.storage_key AS storageKey,f.original_name AS fileName,f.content_type AS contentType,f.size,f.purpose,f.id,f.workspace_id AS workspaceId,f.deleted_at AS deletedAt FROM sources s JOIN source_versions v ON v.source_id=s.id AND v.version=(SELECT MAX(v2.version) FROM source_versions v2 WHERE v2.source_id=s.id) LEFT JOIN stored_files f ON f.id=v.file_id WHERE s.workspace_id=? AND s.id=?').get(workspaceId,sourceId);
+  return row ? {...shapeSource(row),...row} : null;
 }
 export function getSourceForFile(workspaceId, fileId) {
-  const row = db.prepare('SELECT s.data,v.source_id AS sourceId,v.version FROM source_versions v JOIN sources s ON s.id=v.source_id WHERE v.workspace_id=? AND v.file_id=?').get(workspaceId,fileId);
-  return row ? { ...JSON.parse(row.data), id: row.sourceId, version: row.version } : null;
+  const row = db.prepare('SELECT s.*,v.source_id AS sourceId,v.version FROM source_versions v JOIN sources s ON s.id=v.source_id WHERE v.workspace_id=? AND v.file_id=?').get(workspaceId,fileId);
+  return row ? { ...shapeSource(row), id: row.sourceId, version: row.version } : null;
 }
 export function canAccessCollection(workspaceId, category, userId, role) {
   if (typeof category !== 'string' || !category.trim()) return false;
@@ -398,23 +543,43 @@ export function collectionMembersExist(workspaceId, userIds) {
 }
 export function insertStoredFile(file) {
   db.prepare('INSERT INTO stored_files(id,workspace_id,owner_id,uploader_id,purpose,resource_id,original_name,content_type,size,checksum,storage_key,scan_status,uploaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(file.id,file.workspaceId,file.ownerId,file.uploaderId,file.purpose,file.resourceId,file.originalName,file.contentType,file.size,file.checksum,file.storageKey,'quarantined',file.uploadedAt);
-  recordFileAction({ workspaceId: file.workspaceId, fileId: file.id, actorId: file.uploaderId, action: file.action || 'upload', details: { purpose: file.purpose, checksum: file.checksum, size: file.size } });
+  recordFileAction({ workspaceId: file.workspaceId, fileId: file.id, actorId: file.uploaderId, action: file.action || 'upload', details: { purpose: file.purpose, checksum: file.checksum, size: file.size }, requestOrigin:file.requestOrigin });
 }
 export function getStoredFile(workspaceId, fileId) { return db.prepare('SELECT id,workspace_id AS workspaceId,owner_id AS ownerId,uploader_id AS uploaderId,purpose,resource_id AS resourceId,original_name AS originalName,content_type AS contentType,size,checksum,storage_key AS storageKey,scan_status AS scanStatus,scan_engine AS scanEngine,uploaded_at AS uploadedAt,deleted_at AS deletedAt FROM stored_files WHERE workspace_id=? AND id=?').get(workspaceId,fileId) || null; }
 export function getStoredFileById(fileId) { return db.prepare('SELECT id,workspace_id AS workspaceId,owner_id AS ownerId,uploader_id AS uploaderId,purpose,resource_id AS resourceId,original_name AS originalName,content_type AS contentType,size,checksum,storage_key AS storageKey,scan_status AS scanStatus,scan_engine AS scanEngine,uploaded_at AS uploadedAt,deleted_at AS deletedAt FROM stored_files WHERE id=?').get(fileId) || null; }
-export function updateStoredFileScan(workspaceId, fileId, actorId, status, engine, detail = '') {
+export function updateStoredFileScan(workspaceId, fileId, actorId, status, engine, detail = '', requestOrigin = null) {
   const changed = db.prepare('UPDATE stored_files SET scan_status=?,scan_engine=? WHERE workspace_id=? AND id=? AND deleted_at IS NULL').run(status,engine,workspaceId,fileId).changes > 0;
-  if (changed) recordFileAction({ workspaceId, fileId, actorId, action: 'scan_result', details: { status, engine, detail: String(detail).slice(0,500) } });
+  if (changed) recordFileAction({ workspaceId, fileId, actorId, action: 'scan_result', details: { status, engine, detail: String(detail).slice(0,500) },requestOrigin });
   return changed;
 }
-export function recordFileAction({ workspaceId, fileId, actorId, action, details = {} }) { db.prepare('INSERT INTO file_action_events(id,workspace_id,file_id,actor_id,action,details,created_at) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),workspaceId,fileId,actorId,action,JSON.stringify(details),now()); }
-export function listFileActionEvents(workspaceId, fileId) { return db.prepare('SELECT id,actor_id AS actorId,action,details,created_at AS createdAt FROM file_action_events WHERE workspace_id=? AND file_id=? ORDER BY created_at').all(workspaceId,fileId).map((row)=>({...row,details:JSON.parse(row.details)})); }
-export function markStoredFileDeleted(workspaceId, fileId, actorId) {
+export function recordFileAction({ workspaceId, fileId, actorId, action, details = {}, requestOrigin = null }) { recordAuditEvent({workspaceId,actorId,action:`file.${action}`,targetType:'file',targetId:fileId,requestOrigin,details}); }
+export function listFileActionEvents(workspaceId, fileId) { return listAuditEvents(workspaceId,{limit:1000}).filter((event)=>event.targetType==='file'&&event.targetId===fileId).map((event)=>({...event,action:event.action.startsWith('file.')?event.action.slice(5):event.action})); }
+export function markStoredFileDeleted(workspaceId, fileId, actorId, requestOrigin = null) {
   const changed = db.prepare('UPDATE stored_files SET deleted_at=? WHERE workspace_id=? AND id=? AND deleted_at IS NULL').run(now(),workspaceId,fileId).changes > 0;
-  if (changed) recordFileAction({ workspaceId,fileId,actorId,action:'delete' });
+  if (changed) recordFileAction({ workspaceId,fileId,actorId,action:'delete',requestOrigin });
   return changed;
 }
 export function getSourcesForVerification(workspaceId) {
-  return db.prepare('SELECT s.data,v.source_id AS sourceId,v.version,v.file_id AS fileId,v.checksum,v.expires_at AS expiresAt,f.storage_key AS storageKey,f.scan_status AS scanStatus,f.deleted_at AS deletedAt FROM sources s JOIN source_versions v ON v.source_id=s.id AND v.version=(SELECT MAX(v2.version) FROM source_versions v2 WHERE v2.source_id=s.id) JOIN stored_files f ON f.id=v.file_id WHERE s.workspace_id=?').all(workspaceId).map((row)=>({...JSON.parse(row.data),sourceId:row.sourceId,version:row.version,fileId:row.fileId,checksum:row.checksum,expiresAt:row.expiresAt,storageKey:row.storageKey,scanStatus:row.scanStatus,deletedAt:row.deletedAt}));
+  return db.prepare('SELECT s.*,v.source_id AS sourceId,v.version,v.file_id AS fileId,v.checksum,v.expires_at AS expiresAt,COALESCE(f.storage_key,NULL) AS storageKey,COALESCE(f.scan_status,v.scan_status) AS scanStatus,f.deleted_at AS deletedAt FROM sources s JOIN source_versions v ON v.source_id=s.id AND v.version=(SELECT MAX(v2.version) FROM source_versions v2 WHERE v2.source_id=s.id) LEFT JOIN stored_files f ON f.id=v.file_id WHERE s.workspace_id=?').all(workspaceId).map((row)=>({...shapeSource(row),sourceId:row.sourceId,version:row.version,fileId:row.fileId,checksum:row.checksum,expiresAt:row.expiresAt,storageKey:row.storageKey,scanStatus:row.scanStatus,deletedAt:row.deletedAt}));
+}
+export function markLegacySourceClean(workspaceId, sourceId, version, actorId, engine) {
+  const updated=db.prepare("UPDATE source_versions SET scan_status='clean' WHERE workspace_id=? AND source_id=? AND version=? AND file_id IS NULL AND scan_status='quarantined'").run(workspaceId,sourceId,version).changes>0;
+  if(updated) recordAuditEvent({workspaceId,actorId,action:'source.legacy_rescan_clean',targetType:'source',targetId:sourceId,details:{version,engine}});
+  return updated;
+}
+export function markLegacySourceRejected(workspaceId,sourceId,version,actorId,engine,detail=''){
+  const updated=db.prepare("UPDATE source_versions SET scan_status='rejected' WHERE workspace_id=? AND source_id=? AND version=? AND file_id IS NULL AND scan_status='quarantined'").run(workspaceId,sourceId,version).changes>0;
+  if(updated)recordAuditEvent({workspaceId,actorId,action:'source.legacy_rescan_rejected',targetType:'source',targetId:sourceId,details:{version,engine,detail:String(detail).slice(0,500)}});
+  return updated;
+}
+export function getCleanLegacySourceText(workspaceId,sourceId,version){
+  const status=db.prepare("SELECT scan_status FROM source_versions WHERE workspace_id=? AND source_id=? AND version=? AND file_id IS NULL").get(workspaceId,sourceId,version);
+  if(status?.scan_status!=='clean')return null;
+  return db.prepare('SELECT group_concat(text,char(10)||char(10)) AS text FROM source_passages WHERE workspace_id=? AND source_id=? AND version=?').get(workspaceId,sourceId,version)?.text||null;
+}
+export function legacySourcesForRescan(workspaceId = null) {
+  return db.prepare(`SELECT s.id,s.workspace_id AS workspaceId,s.name,s.category,s.type,v.version,v.checksum,v.owner_id AS ownerId,v.uploader_id AS uploaderId,v.uploaded_at AS uploadedAt,v.expires_at AS expiresAt,p.text
+    FROM sources s JOIN source_versions v ON v.source_id=s.id LEFT JOIN source_passages p ON p.source_id=v.source_id AND p.version=v.version
+    WHERE v.file_id IS NULL AND v.scan_status='quarantined' AND (? IS NULL OR s.workspace_id=?) ORDER BY s.workspace_id,s.id,v.version,p.passage_number`).all(workspaceId,workspaceId);
 }
 export function closeStore() { clearInterval(sessionPurgeTimer); db.close(); }

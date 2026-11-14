@@ -15,17 +15,17 @@ export async function storeTextUpload({ upload, request, purpose, resourceId, ow
   const safeDisplayName = path.basename(String(upload.originalname || 'upload')).replace(/[\r\n\0]/g, '').slice(0, 240) || 'upload';
   await storage.put(id, upload.buffer);
   try {
-    insertStoredFile({ id, workspaceId: request.user.workspaceId, ownerId, uploaderId: request.user.userId, purpose, resourceId, originalName: safeDisplayName, contentType, size: upload.size, checksum, storageKey: id, uploadedAt: timestamp, action });
+    insertStoredFile({ id, workspaceId: request.user.workspaceId, ownerId, uploaderId: request.user.userId, purpose, resourceId, originalName: safeDisplayName, contentType, size: upload.size, checksum, storageKey: id, uploadedAt: timestamp, action, requestOrigin:request.get?.('origin')||request.get?.('referer')||null });
   } catch (error) {
     await storage.delete(id).catch(() => {});
     throw error;
   }
   try {
     const result = await scanUpload(upload.buffer);
-    updateStoredFileScan(request.user.workspaceId, id, request.user.userId, result.status, result.engine, result.detail || '');
+    updateStoredFileScan(request.user.workspaceId, id, request.user.userId, result.status, result.engine, result.detail || '', request.get?.('origin')||request.get?.('referer')||null);
   } catch (error) {
     console.error(`[file scanner] Upload ${id} remains quarantined: ${error.message}`);
-    updateStoredFileScan(request.user.workspaceId, id, request.user.userId, 'quarantined', 'unavailable', error.message);
+    updateStoredFileScan(request.user.workspaceId, id, request.user.userId, 'quarantined', 'unavailable', error.message, request.get?.('origin')||request.get?.('referer')||null);
   }
   const record = getStoredFile(request.user.workspaceId, id);
   return { record, text, storage };

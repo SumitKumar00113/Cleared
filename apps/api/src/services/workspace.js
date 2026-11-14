@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createInvitation, getWorkspace, listMembers, changeMemberRole, removeMember, getWorkspaceMemberByEmail, revokeInvitation } from './store.js';
+import { createInvitation, getWorkspace, listMembers, changeMemberRole, removeMember, getWorkspaceMemberByEmail, revokeInvitation, listAuditEvents } from './store.js';
 import { authRateLimit, requireRecentAuth, requireRole } from './auth.js';
 import { sendMail } from './mailer.js';
 
@@ -10,6 +10,18 @@ workspaceRouter.get('/', (request, response) => {
   const workspace = getWorkspace(request.user.workspaceId);
   if (!workspace) return response.status(404).json({ error: 'Workspace not found.' });
   return response.json({ data: { ...workspace, role: request.user.role } });
+});
+
+workspaceRouter.get('/audit', requireRole(['owner','administrator']), (request,response)=>{
+  const data=listAuditEvents(request.user.workspaceId,{limit:request.query.limit,before:request.query.before||null});
+  return response.json({data});
+});
+workspaceRouter.get('/audit/export', requireRole(['owner','administrator']), (request,response)=>{
+  const rows=listAuditEvents(request.user.workspaceId,{limit:1000,before:request.query.before||null});
+  const quote=(value)=>`"${String(value??'').replaceAll('"','""')}"`;
+  const csv=['id,workspaceId,actorId,actorEmail,action,targetType,targetId,occurredAt,requestOrigin,details',...rows.map((row)=>[row.id,row.workspaceId,row.actorId,row.actorEmail,row.action,row.targetType,row.targetId,row.occurredAt,row.requestOrigin,JSON.stringify(row.details)].map(quote).join(','))].join('\r\n');
+  response.setHeader('Content-Type','text/csv; charset=utf-8'); response.setHeader('Content-Disposition','attachment; filename="workspace-audit.csv"'); response.setHeader('Cache-Control','private, no-store');
+  return response.send(csv);
 });
 
 workspaceRouter.get('/members', requireRole(['owner', 'administrator']), (request, response) => response.json({ data: listMembers(request.user.workspaceId) }));

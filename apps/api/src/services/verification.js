@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { canAccessCollection, getReview, getSourcesForVerification, getStoredFile, saveReview } from './store.js';
+import { canAccessCollection, getCleanLegacySourceText, getReview, getSourcesForVerification, getStoredFile, saveReview } from './store.js';
 import { readCleanFile } from './private-files.js';
 import { validateTextUpload } from './file-validation.js';
 import path from 'node:path';
@@ -25,6 +25,7 @@ verificationRouter.post('/check/:reviewId', async (request, response) => {
   const candidates = getSourcesForVerification(request.user.workspaceId).filter((source) => canAccessCollection(request.user.workspaceId, source.category, request.user.userId, request.user.role) && source.scanStatus === 'clean' && !source.deletedAt && (!source.expiresAt || new Date(source.expiresAt).getTime() > currentTime));
   const usableSources = [];
   for (const source of candidates) {
+    if(!source.fileId){const text=getCleanLegacySourceText(request.user.workspaceId,source.id,source.version);if(text)usableSources.push({...source,text});continue;}
     const file = getStoredFile(request.user.workspaceId, source.fileId);
     if (!file || file.scanStatus !== 'clean' || file.deletedAt) continue;
     const bytes = await readCleanFile(file);
@@ -63,7 +64,7 @@ verificationRouter.post('/check/:reviewId', async (request, response) => {
     review.claimResults = findings;
     review.verifiedAt = new Date().toISOString();
     if (review.findings) review.status = 'Needs changes';
-    saveReview(request.user.workspaceId, review);
+    saveReview(request.user.workspaceId, review, request.user.userId, request.get('origin') || request.get('referer'), { recordDecision: false });
     return response.json({ data: { review, claims: findings, provider: 'Gemini', model } });
   } catch (error) {
     return response.status(502).json({ error: error instanceof SyntaxError ? 'Gemini returned an unreadable response. Please try again.' : 'Could not connect to Gemini.' });

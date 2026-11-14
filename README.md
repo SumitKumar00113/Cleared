@@ -7,6 +7,7 @@ The current codebase is an MVP-style implementation that includes:
 - an Express API with role-based access control
 - SQLite-backed persistence for workspaces, users, invitations, reviews, and approved sources
 - private file storage, scan-gated TXT/MD/CSV uploads, and versioned sources
+- append-only workspace audit history, revision-bound review decisions, and per-review history
 - an optional AI verification step using the Gemini API
 
 ## Product overview
@@ -32,7 +33,7 @@ This repository is a working MVP, not a fully production-hardened platform. The 
 - verification checks against trusted source text
 - SQLite database persistence with workspace scoping
 
-The project also contains a Supabase migration scaffold for a future managed-auth and multi-tenant architecture, but the live runtime in this repo still uses the local Express + SQLite implementation.
+The project also contains a Supabase migration scaffold for future PostgreSQL/RLS planning, but the live runtime in this repo still uses the existing Express + SQLite implementation. Keep the scaffold as an inactive design reference; it needs schema parity review before any future use. No second runtime is active.
 
 ## Core features
 
@@ -56,7 +57,13 @@ The project also contains a Supabase migration scaffold for a future managed-aut
 
 Development defaults to `FILE_STORAGE=local` and an in-memory development scanner bypass that logs a prominent warning. Configure `FILE_SCANNER=clamav`, `CLAMAV_HOST`, and optionally `CLAMAV_PORT` to scan locally. Production defaults to S3-compatible private storage and requires `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY`; set `FILE_STORAGE=s3` explicitly in deployment. Configure ClamAV with `FILE_SCANNER=clamav` and `CLAMAV_HOST` before production uploads can be marked clean or downloaded. Without a production scanner, uploaded files remain quarantined. See `.env.example` for variable names.
 
-Downloads are issued by the API at `/api/files/:fileId/link` and expire after two minutes. The signed token is bound to the user, workspace, and file; the API rechecks active membership and resource access when the link is used. A temporary SQLite `file_action_events` hook records upload, version, download, delete, and scan result events for Phase 3 audit-log integration.
+Downloads are issued by the API at `/api/files/:fileId/link` and expire after two minutes. The signed token is bound to the user, workspace, and file; the API rechecks active membership and resource access when the link is used. File actions and review, auth, MFA, membership, invitation, verification, and decision events are stored in append-only `audit_events`. Owners and administrators can list and export only their own workspace's events at `/api/workspace/audit` and `/api/workspace/audit/export`. Each review history panel reads revisions and decisions alongside these audit events.
+
+Before deploying an existing SQLite database, run `npm run db:up --workspace @cleared/api`. The migration creates a timestamped SQLite backup before conversion. Roll back with `npm run db:down --workspace @cleared/api`; this restores the Phase 2 API schema from the retained migration snapshot and archives Phase 3 tables with a `phase3_archive_` prefix. Stop the API before either command. Keep the backup outside the host where practical.
+
+Legacy metadata-only source versions start quarantined. Revalidate and scan them with `npm run sources:rescan-legacy --workspace @cleared/api`; to limit the run to one workspace, append `-- <workspace-id>`. In development, the explicit scanner-not-configured mode logs a warning; production requires an available ClamAV service. Clean legacy text passages can then be used for verification, but they do not have downloadable file objects.
+
+For local MinIO and ClamAV service integration, start the services with `docker compose -f docker-compose.phase2-integration.yml up -d --wait`, run `npm run test:integration --workspace @cleared/api`, and stop them with `docker compose -f docker-compose.phase2-integration.yml down`. The integration tests exercise the S3-compatible adapter, clean and EICAR scans, unreachable-scanner quarantine behavior, and ClamAV size limits. The compose setup uses local-only test credentials and a persistent MinIO/ClamAV data volume; do not reuse those credentials in a deployment.
 
 ### Review workflow
 - Submit a review title plus draft text or file upload
@@ -340,15 +347,12 @@ This MVP is intentionally compact, but several things are still not implemented 
 
 - PDF/DOCX extraction is not implemented
 - source uploads are limited to TXT, MD, and CSV
-- invitation emails are not actually sent
-- email verification, password reset, and MFA are not implemented yet
-- sessions are persisted in SQLite, but the setup is single-instance and has no managed session store
-- login and invitation acceptance have account/IP progressive lockouts; password-reset protection will be added with that endpoint
-- no strong audit-event timeline yet
+- production needs configured SMTP for invitation and account emails
+- sessions are persisted in SQLite, so the setup is single-instance and has no managed session store
 - no production deployment configuration for scaling
-- no malware scanning integration yet
-- no production-ready SSO, MFA, or SOC controls yet
-- no migration from SQLite to a managed PostgreSQL architecture is active in this runtime
+- the MinIO/ClamAV integration setup is available but has not been run against live containers here
+- no managed PostgreSQL runtime is active; see [PostgreSQL portability notes](docs/postgresql-portability.md)
+- no production-ready SSO or compliance certification is claimed
 
 ## Future roadmap
 

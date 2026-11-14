@@ -30,6 +30,13 @@ CREATE TABLE IF NOT EXISTS memberships (workspace_id TEXT NOT NULL REFERENCES wo
 CREATE TABLE IF NOT EXISTS invitations (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), email TEXT NOT NULL, role TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL, accepted_at TEXT);
 CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS stored_files (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), owner_id TEXT NOT NULL REFERENCES users(id), uploader_id TEXT NOT NULL REFERENCES users(id), purpose TEXT NOT NULL CHECK(purpose IN ('review','source')), resource_id TEXT NOT NULL, original_name TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, checksum TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, scan_status TEXT NOT NULL DEFAULT 'quarantined' CHECK(scan_status IN ('quarantined','clean','rejected')), scan_engine TEXT, uploaded_at TEXT NOT NULL, deleted_at TEXT);
+CREATE TABLE IF NOT EXISTS source_versions (source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, version INTEGER NOT NULL, file_id TEXT REFERENCES stored_files(id), owner_id TEXT NOT NULL REFERENCES users(id), uploader_id TEXT NOT NULL REFERENCES users(id), checksum TEXT NOT NULL, uploaded_at TEXT NOT NULL, expires_at TEXT, PRIMARY KEY(source_id,version));
+CREATE TABLE IF NOT EXISTS collection_access (workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, category TEXT NOT NULL, allowed_roles TEXT NOT NULL, allowed_user_ids TEXT NOT NULL, updated_by TEXT NOT NULL REFERENCES users(id), updated_at TEXT NOT NULL, PRIMARY KEY(workspace_id,category));
+CREATE TABLE IF NOT EXISTS file_action_events (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), file_id TEXT NOT NULL, actor_id TEXT NOT NULL REFERENCES users(id), action TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS stored_files_workspace ON stored_files(workspace_id, id);
+CREATE INDEX IF NOT EXISTS source_versions_file ON source_versions(file_id);
+CREATE INDEX IF NOT EXISTS file_action_events_workspace ON file_action_events(workspace_id, created_at);
 CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, expires_at TEXT NOT NULL, user_agent TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_used_at TEXT NOT NULL, revoked_at TEXT, mfa_verified INTEGER NOT NULL DEFAULT 0, mfa_verified_at TEXT, recent_auth_at TEXT);
 CREATE INDEX IF NOT EXISTS sessions_user_active ON sessions(user_id, expires_at) WHERE revoked_at IS NULL;
 CREATE TABLE IF NOT EXISTS auth_attempts (bucket TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, window_started_at INTEGER NOT NULL, locked_until INTEGER NOT NULL DEFAULT 0);
@@ -66,6 +73,16 @@ if (!sessionColumns.has('mfa_verified_at')) db.exec('ALTER TABLE sessions ADD CO
 if (!sessionColumns.has('recent_auth_at')) db.exec('ALTER TABLE sessions ADD COLUMN recent_auth_at TEXT');
 
 const now = () => new Date().toISOString();
+// Preserve pre-Phase-2 source metadata as a quarantined metadata-only first version.
+for (const row of db.prepare('SELECT id,workspace_id AS workspaceId,data FROM sources').all()) {
+  const source = JSON.parse(row.data);
+  if (db.prepare('SELECT 1 FROM source_versions WHERE source_id=? LIMIT 1').get(row.id)) continue;
+  const ownerId = source.ownerId || db.prepare('SELECT u.id FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.workspace_id=? AND lower(u.email)=lower(?)').get(row.workspaceId, source.owner)?.id;
+  if (!ownerId || !db.prepare('SELECT 1 FROM users WHERE id=?').get(ownerId)) continue;
+  const uploaderId = source.uploaderId && db.prepare('SELECT 1 FROM users WHERE id=?').get(source.uploaderId) ? source.uploaderId : ownerId;
+  const checksum = createHash('sha256').update(String(source.text || '')).digest('hex');
+  db.prepare('INSERT INTO source_versions(source_id,workspace_id,version,file_id,owner_id,uploader_id,checksum,uploaded_at,expires_at) VALUES(?,?,?,NULL,?,?,?,?,?)').run(row.id,row.workspaceId,source.version || 1,ownerId,uploaderId,checksum,source.uploadedAt || source.updated || now(),source.expiresAt || null);
+}
 function transaction(callback) {
   db.exec('BEGIN IMMEDIATE');
   try { const result = callback(); db.exec('COMMIT'); return result; }
@@ -334,5 +351,70 @@ export function saveReview(workspaceId, record) { db.prepare('INSERT OR REPLACE 
 export function getReviews(workspaceId) { return db.prepare('SELECT data FROM reviews WHERE workspace_id=? ORDER BY rowid DESC').all(workspaceId).map((row) => JSON.parse(row.data)); }
 export function getReview(workspaceId, id) { const row = db.prepare('SELECT data FROM reviews WHERE workspace_id=? AND id=?').get(workspaceId, id); return row ? JSON.parse(row.data) : null; }
 export function saveSource(workspaceId, record) { db.prepare('INSERT OR REPLACE INTO sources(id,workspace_id,data) VALUES(?,?,?)').run(record.id, workspaceId, JSON.stringify(record)); }
-export function getSources(workspaceId) { return db.prepare('SELECT data FROM sources WHERE workspace_id=? ORDER BY rowid DESC').all(workspaceId).map((row) => JSON.parse(row.data)); }
+export function getSource(workspaceId, sourceId) { const row = db.prepare('SELECT data FROM sources WHERE workspace_id=? AND id=?').get(workspaceId, sourceId); return row ? JSON.parse(row.data) : null; }
+export function getSources(workspaceId) {
+  return db.prepare('SELECT s.data,v.version,v.file_id AS fileId,v.checksum,v.uploaded_at AS uploadedAt,v.expires_at AS expiresAt,f.scan_status AS scanStatus FROM sources s LEFT JOIN source_versions v ON v.source_id=s.id AND v.version=(SELECT MAX(v2.version) FROM source_versions v2 WHERE v2.source_id=s.id) LEFT JOIN stored_files f ON f.id=v.file_id WHERE s.workspace_id=? ORDER BY s.rowid DESC').all(workspaceId).map((row) => {
+    const record = JSON.parse(row.data);
+    // Keep the legacy response field while ensuring uploaded source bytes are available only through authorized file links.
+    return { ...record, text: '', ...(row.version ? { version: row.version, fileId: row.fileId, checksum: row.checksum, uploadedAt: row.uploadedAt, expiresAt: row.expiresAt, scanStatus: row.scanStatus || 'quarantined' } : { scanStatus: 'quarantined' }) };
+  });
+}
+export function getSourceVersionRows(workspaceId, sourceId) {
+  return db.prepare('SELECT v.source_id AS sourceId,v.version,v.file_id AS fileId,v.owner_id AS ownerId,owner.email AS owner,v.uploader_id AS uploaderId,uploader.email AS uploader,v.checksum,v.uploaded_at AS uploadedAt,v.expires_at AS expiresAt,f.original_name AS fileName,f.content_type AS contentType,f.size,f.scan_status AS scanStatus FROM source_versions v JOIN users owner ON owner.id=v.owner_id JOIN users uploader ON uploader.id=v.uploader_id LEFT JOIN stored_files f ON f.id=v.file_id WHERE v.workspace_id=? AND v.source_id=? ORDER BY v.version DESC').all(workspaceId, sourceId);
+}
+export function saveSourceVersion(workspaceId, source, version) {
+  transaction(() => {
+    db.prepare('INSERT INTO sources(id,workspace_id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id,data=excluded.data').run(source.id, workspaceId, JSON.stringify(source));
+    db.prepare('INSERT INTO source_versions(source_id,workspace_id,version,file_id,owner_id,uploader_id,checksum,uploaded_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?)').run(source.id, workspaceId, version.version, version.fileId, version.ownerId, version.uploaderId, version.checksum, version.uploadedAt, version.expiresAt || null);
+  });
+}
+export function getCurrentSourceFile(workspaceId, sourceId) {
+  return db.prepare('SELECT s.data,v.version,v.file_id AS fileId,v.owner_id AS ownerId,v.uploader_id AS uploaderId,v.checksum,v.uploaded_at AS uploadedAt,v.expires_at AS expiresAt,f.storage_key AS storageKey,f.original_name AS fileName,f.content_type AS contentType,f.size,f.scan_status AS scanStatus,f.purpose,f.id,f.workspace_id AS workspaceId,f.deleted_at AS deletedAt FROM sources s JOIN source_versions v ON v.source_id=s.id AND v.version=(SELECT MAX(v2.version) FROM source_versions v2 WHERE v2.source_id=s.id) JOIN stored_files f ON f.id=v.file_id WHERE s.workspace_id=? AND s.id=?').get(workspaceId, sourceId) || null;
+}
+export function getSourceForFile(workspaceId, fileId) {
+  const row = db.prepare('SELECT s.data,v.source_id AS sourceId,v.version FROM source_versions v JOIN sources s ON s.id=v.source_id WHERE v.workspace_id=? AND v.file_id=?').get(workspaceId,fileId);
+  return row ? { ...JSON.parse(row.data), id: row.sourceId, version: row.version } : null;
+}
+export function canAccessCollection(workspaceId, category, userId, role) {
+  if (typeof category !== 'string' || !category.trim()) return false;
+  const row = db.prepare('SELECT allowed_roles AS allowedRoles,allowed_user_ids AS allowedUserIds FROM collection_access WHERE workspace_id=? AND category=?').get(workspaceId,category);
+  if (!row) return true;
+  return JSON.parse(row.allowedRoles).includes(role) || JSON.parse(row.allowedUserIds).includes(userId);
+}
+export function getCollectionAccess(workspaceId, category) {
+  const row = db.prepare('SELECT allowed_roles AS allowedRoles,allowed_user_ids AS allowedUserIds,updated_by AS updatedBy,updated_at AS updatedAt FROM collection_access WHERE workspace_id=? AND category=?').get(workspaceId,category);
+  return row ? { category, allowedRoles: JSON.parse(row.allowedRoles), allowedUserIds: JSON.parse(row.allowedUserIds), updatedBy: row.updatedBy, updatedAt: row.updatedAt } : { category, allowedRoles: null, allowedUserIds: null, updatedBy: null, updatedAt: null };
+}
+export function setCollectionAccess(workspaceId, category, roles, userIds, actorId) {
+  const updatedAt = now();
+  db.prepare('INSERT INTO collection_access(workspace_id,category,allowed_roles,allowed_user_ids,updated_by,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(workspace_id,category) DO UPDATE SET allowed_roles=excluded.allowed_roles,allowed_user_ids=excluded.allowed_user_ids,updated_by=excluded.updated_by,updated_at=excluded.updated_at').run(workspaceId,category,JSON.stringify(roles),JSON.stringify(userIds),actorId,updatedAt);
+  return { category, allowedRoles: roles, allowedUserIds: userIds, updatedAt };
+}
+export function collectionMembersExist(workspaceId, userIds) {
+  if (!userIds.length) return true;
+  const placeholders = userIds.map(() => '?').join(',');
+  const count = db.prepare(`SELECT COUNT(*) AS count FROM memberships WHERE workspace_id=? AND user_id IN (${placeholders})`).get(workspaceId,...userIds).count;
+  return count === userIds.length;
+}
+export function insertStoredFile(file) {
+  db.prepare('INSERT INTO stored_files(id,workspace_id,owner_id,uploader_id,purpose,resource_id,original_name,content_type,size,checksum,storage_key,scan_status,uploaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(file.id,file.workspaceId,file.ownerId,file.uploaderId,file.purpose,file.resourceId,file.originalName,file.contentType,file.size,file.checksum,file.storageKey,'quarantined',file.uploadedAt);
+  recordFileAction({ workspaceId: file.workspaceId, fileId: file.id, actorId: file.uploaderId, action: file.action || 'upload', details: { purpose: file.purpose, checksum: file.checksum, size: file.size } });
+}
+export function getStoredFile(workspaceId, fileId) { return db.prepare('SELECT id,workspace_id AS workspaceId,owner_id AS ownerId,uploader_id AS uploaderId,purpose,resource_id AS resourceId,original_name AS originalName,content_type AS contentType,size,checksum,storage_key AS storageKey,scan_status AS scanStatus,scan_engine AS scanEngine,uploaded_at AS uploadedAt,deleted_at AS deletedAt FROM stored_files WHERE workspace_id=? AND id=?').get(workspaceId,fileId) || null; }
+export function getStoredFileById(fileId) { return db.prepare('SELECT id,workspace_id AS workspaceId,owner_id AS ownerId,uploader_id AS uploaderId,purpose,resource_id AS resourceId,original_name AS originalName,content_type AS contentType,size,checksum,storage_key AS storageKey,scan_status AS scanStatus,scan_engine AS scanEngine,uploaded_at AS uploadedAt,deleted_at AS deletedAt FROM stored_files WHERE id=?').get(fileId) || null; }
+export function updateStoredFileScan(workspaceId, fileId, actorId, status, engine, detail = '') {
+  const changed = db.prepare('UPDATE stored_files SET scan_status=?,scan_engine=? WHERE workspace_id=? AND id=? AND deleted_at IS NULL').run(status,engine,workspaceId,fileId).changes > 0;
+  if (changed) recordFileAction({ workspaceId, fileId, actorId, action: 'scan_result', details: { status, engine, detail: String(detail).slice(0,500) } });
+  return changed;
+}
+export function recordFileAction({ workspaceId, fileId, actorId, action, details = {} }) { db.prepare('INSERT INTO file_action_events(id,workspace_id,file_id,actor_id,action,details,created_at) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),workspaceId,fileId,actorId,action,JSON.stringify(details),now()); }
+export function listFileActionEvents(workspaceId, fileId) { return db.prepare('SELECT id,actor_id AS actorId,action,details,created_at AS createdAt FROM file_action_events WHERE workspace_id=? AND file_id=? ORDER BY created_at').all(workspaceId,fileId).map((row)=>({...row,details:JSON.parse(row.details)})); }
+export function markStoredFileDeleted(workspaceId, fileId, actorId) {
+  const changed = db.prepare('UPDATE stored_files SET deleted_at=? WHERE workspace_id=? AND id=? AND deleted_at IS NULL').run(now(),workspaceId,fileId).changes > 0;
+  if (changed) recordFileAction({ workspaceId,fileId,actorId,action:'delete' });
+  return changed;
+}
+export function getSourcesForVerification(workspaceId) {
+  return db.prepare('SELECT s.data,v.source_id AS sourceId,v.version,v.file_id AS fileId,v.checksum,v.expires_at AS expiresAt,f.storage_key AS storageKey,f.scan_status AS scanStatus,f.deleted_at AS deletedAt FROM sources s JOIN source_versions v ON v.source_id=s.id AND v.version=(SELECT MAX(v2.version) FROM source_versions v2 WHERE v2.source_id=s.id) JOIN stored_files f ON f.id=v.file_id WHERE s.workspace_id=?').all(workspaceId).map((row)=>({...JSON.parse(row.data),sourceId:row.sourceId,version:row.version,fileId:row.fileId,checksum:row.checksum,expiresAt:row.expiresAt,storageKey:row.storageKey,scanStatus:row.scanStatus,deletedAt:row.deletedAt}));
+}
 export function closeStore() { clearInterval(sessionPurgeTimer); db.close(); }

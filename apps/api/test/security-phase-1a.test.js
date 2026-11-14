@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
 
-let directory, store, server, base, app, mfa, mailer;
+let directory, store, server, base, app, mfa, mailer, phase2SourceId;
 let ownerA, ownerB, memberA, reviewA, sourceA, jarA, jarB, csrfA, csrfB;
 let ownerC, workspaceC, ownerCCookie, ownerCCsrf, ownerCRecoveryCodes, ownerCTotpSecret;
 const TEST_TOTP_SECRET = 'JBSWY3DPEHPK3PXP';
@@ -19,6 +19,9 @@ before(async () => {
   process.env.SESSION_SECRET = 'test-session-secret-with-at-least-32-characters';
   process.env.MFA_ENCRYPTION_KEY = '11'.repeat(32);
   process.env.NODE_ENV = 'test';
+  process.env.FILE_STORAGE = 'local';
+  process.env.FILE_SCANNER = 'none';
+  process.env.LOCAL_STORAGE_DIR = path.join(directory, 'private-files');
   store = await import('../src/services/store.js');
   mfa = await import('../src/services/mfa.js');
   mailer = await import('../src/services/mailer.js');
@@ -66,6 +69,12 @@ async function request(route, { method = 'GET', jar = '', token, body, headers =
 }
 async function get(route, jar = '') { return request(route, { jar }); }
 async function write(route, jar, token, method, body, headers = {}) { return request(route, { method, jar, token, body, headers }); }
+function uploadForm(filename, content, fields = {}) {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) form.append(key, value);
+  form.append('file', new Blob([content]), filename);
+  return form;
+}
 async function login(email, password, workspaceId) {
   let result = await get('/api/auth/csrf');
   const token = result.data.token;
@@ -77,6 +86,10 @@ async function login(email, password, workspaceId) {
   }
   assert.equal(result.status, 200);
   return result.jar;
+}
+async function refreshOwnerASession() {
+  jarA = await login('owner-a@test.example', 'LongAndUniquePassword_A!2026', ownerA.workspace.id);
+  const csrf = await get('/api/auth/csrf', jarA); jarA = csrf.jar; csrfA = csrf.data.token;
 }
 
 test('database sessions persist, record activity, can be listed and revoked', async () => {
@@ -135,10 +148,11 @@ test('CORS accepts configured development origin and rejects other origins', asy
 
 test('production startup rejects weak secrets and non-HTTPS wildcard origins', async () => {
   const { validateEnvironment } = await import('../src/server.js');
-  const valid = { NODE_ENV: 'production', SESSION_SECRET: 'strong-random-secret-that-is-over-thirty-two-characters', CORS_ORIGINS: 'https://app.example', APP_BASE_URL: 'https://app.example', SMTP_HOST: 'smtp.example', SMTP_PORT: '587', SMTP_USER: 'sender', SMTP_PASS: 'mail-secret', MAIL_FROM: 'noreply@example.com', MFA_ENCRYPTION_KEY: '22'.repeat(32) };
+  const valid = { NODE_ENV: 'production', SESSION_SECRET: 'strong-random-secret-that-is-over-thirty-two-characters', CORS_ORIGINS: 'https://app.example', APP_BASE_URL: 'https://app.example', SMTP_HOST: 'smtp.example', SMTP_PORT: '587', SMTP_USER: 'sender', SMTP_PASS: 'mail-secret', MAIL_FROM: 'noreply@example.com', MFA_ENCRYPTION_KEY: '22'.repeat(32), FILE_STORAGE: 's3', S3_ENDPOINT: 'https://s3.example', S3_BUCKET: 'private-files', S3_ACCESS_KEY_ID: 'access', S3_SECRET_ACCESS_KEY: 'secret' };
   assert.throws(() => validateEnvironment({ ...valid, SESSION_SECRET: 'weak' }), /strong SESSION_SECRET/);
   assert.throws(() => validateEnvironment({ ...valid, CORS_ORIGINS: '*' }), /exact origin/);
   assert.throws(() => validateEnvironment({ ...valid, CORS_ORIGINS: 'http://app.example' }), /HTTPS/);
+  assert.throws(() => validateEnvironment({ ...valid, S3_ENDPOINT: 'http://s3.example' }), /HTTPS S3_ENDPOINT/);
   assert.equal(validateEnvironment(valid), true);
 });
 
@@ -451,4 +465,146 @@ test('login failures use generic errors and progressive lockout', async () => {
   response = await write('/api/auth/login', csrf.jar, csrf.data.token, 'POST', JSON.stringify({ email: 'missing-user@test.example', password: 'WrongPassword_2026!!', workspaceId: ownerA.workspace.id }), { 'Content-Type': 'application/json', ...forwarded });
   assert.equal(response.status, 429);
   assert.ok(Number(response.headers.get('retry-after')) > 0);
+});
+
+test('private source downloads are workspace and user bound, signed, and short lived', async () => {
+  await refreshOwnerASession();
+  const uploaded = await write('/api/sources', jarA, csrfA, 'POST', uploadForm('../../traversal.txt', 'Approved text with safe storage.', { name: 'Traversal check', category: 'Policies' }));
+  assert.equal(uploaded.status, 201);
+  assert.equal(uploaded.data.data.scanStatus, 'clean');
+  assert.equal(uploaded.data.data.text, '');
+  phase2SourceId = uploaded.data.data.id;
+  const fileId = uploaded.data.data.fileId;
+  assert.match(fileId, /^[0-9a-f-]{36}$/i);
+  assert.notEqual(fileId, uploaded.data.data.fileName);
+  assert.equal(store.getStoredFile(ownerA.workspace.id, fileId).storageKey, fileId);
+  assert.ok(store.listFileActionEvents(ownerA.workspace.id, fileId).some((event) => event.action === 'scan_result'));
+  assert.equal((await fetch(`${base}/uploads/reviews/${fileId}`)).status, 404);
+
+  const createdLink = await write(`/api/files/${fileId}/link`, uploaded.jar, csrfA, 'POST');
+  assert.equal(createdLink.status, 200);
+  assert.ok(new Date(createdLink.data.data.expiresAt).getTime() - Date.now() <= 120_000);
+  assert.equal((await get(createdLink.data.data.url, jarB)).status, 404);
+  const tampered = new URL(createdLink.data.data.url, base);
+  tampered.searchParams.set('token', tampered.searchParams.get('token').replace(/.$/, 'x'));
+  assert.equal((await fetch(tampered, { headers: { Cookie: uploaded.jar } })).status, 404);
+
+  const success = await fetch(new URL(createdLink.data.data.url, base), { headers: { Cookie: uploaded.jar } });
+  assert.equal(success.status, 200);
+  assert.match(success.headers.get('content-disposition'), /attachment/);
+  assert.equal(success.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(await success.text(), 'Approved text with safe storage.');
+  store.updateStoredFileScan(ownerA.workspace.id, fileId, ownerA.user.userId, 'quarantined', 'test-rescan', 'forced quarantine');
+  assert.equal((await fetch(new URL(createdLink.data.data.url, base), { headers: { Cookie: uploaded.jar } })).status, 404);
+
+  const realNow = Date.now;
+  try {
+    Date.now = () => new Date(createdLink.data.data.expiresAt).getTime() + 1000;
+    assert.equal((await fetch(new URL(createdLink.data.data.url, base), { headers: { Cookie: uploaded.jar } })).status, 404);
+  } finally { Date.now = realNow; }
+});
+
+test('source versions are retained and expired latest sources are excluded from verification', async () => {
+  await refreshOwnerASession();
+  const original = store.getSourceVersionRows(ownerA.workspace.id, phase2SourceId);
+  assert.equal(original.length, 1);
+  const next = await write(`/api/sources/${phase2SourceId}/versions`, jarA, csrfA, 'POST', uploadForm('replacement.md', 'Version two source.', { expiresAt: '2020-01-01T00:00:00.000Z' }));
+  assert.equal(next.status, 201);
+  assert.equal(next.data.data.version, 2);
+  assert.ok(store.listFileActionEvents(ownerA.workspace.id, next.data.data.fileId).some((event) => event.action === 'new_version'));
+  const history = await get(`/api/sources/${phase2SourceId}/versions`, jarA);
+  assert.deepEqual(history.data.data.map((version) => version.version), [2, 1]);
+  assert.equal(history.data.data[1].fileId, original[0].fileId);
+  process.env.GEMINI_API_KEY = 'test-key';
+  try {
+    const result = await write('/api/verification/check/review-a', jarA, csrfA, 'POST');
+    assert.equal(result.status, 409);
+    assert.match(result.data.error, /approved source/i);
+  } finally { delete process.env.GEMINI_API_KEY; }
+});
+
+test('bad text, multiple files, oversized files, and quarantined files are rejected safely', async () => {
+  await refreshOwnerASession();
+  const invalidText = await write('/api/sources', jarA, csrfA, 'POST', uploadForm('bad.txt', Buffer.from([0x66, 0x00, 0x6f]), { name: 'Bad', category: 'Policies' }));
+  assert.equal(invalidText.status, 400);
+  const invalidUtf8 = await write('/api/sources', jarA, csrfA, 'POST', uploadForm('bad.md', Buffer.from([0xc3, 0x28]), { name: 'Bad UTF8', category: 'Policies' }));
+  assert.equal(invalidUtf8.status, 400);
+  const disabledPdf = await write('/api/sources', jarA, csrfA, 'POST', uploadForm('document.pdf', 'Not enabled.', { name: 'PDF', category: 'Policies' }));
+  assert.equal(disabledPdf.status, 415);
+  const oversize = await write('/api/sources', jarA, csrfA, 'POST', uploadForm('large.csv', Buffer.alloc(20 * 1024 * 1024 + 1, 0x61), { name: 'Large', category: 'Policies' }));
+  assert.equal(oversize.status, 400);
+  const multiple = new FormData();
+  multiple.append('name', 'Two files'); multiple.append('category', 'Policies');
+  multiple.append('file', new Blob(['one']), 'one.txt'); multiple.append('file', new Blob(['two']), 'two.txt');
+  assert.equal((await write('/api/sources', jarA, csrfA, 'POST', multiple)).status, 400);
+
+  process.env.FILE_SCANNER = 'unconfigured-test-scanner';
+  let quarantined;
+  try { quarantined = await write('/api/sources', jarA, csrfA, 'POST', uploadForm('hold.txt', 'Must stay unavailable.', { name: 'Quarantined', category: 'FAQs' })); }
+  finally { process.env.FILE_SCANNER = 'none'; }
+  assert.equal(quarantined.status, 201);
+  assert.equal(quarantined.data.data.scanStatus, 'quarantined');
+  assert.equal((await write(`/api/files/${quarantined.data.data.fileId}/link`, jarA, csrfA, 'POST')).status, 404);
+  const previousMode = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+    const productionJar = await login('owner-a@test.example', 'LongAndUniquePassword_A!2026', ownerA.workspace.id);
+    const productionCsrf = await get('/api/auth/csrf', productionJar);
+    const scanResult = await write(`/api/files/${quarantined.data.data.fileId}/scan`, productionCsrf.jar, productionCsrf.data.token, 'POST');
+    assert.equal(scanResult.status, 503);
+    assert.equal(store.getStoredFile(ownerA.workspace.id, quarantined.data.data.fileId).scanStatus, 'quarantined');
+  } finally { process.env.NODE_ENV = previousMode; }
+  const db = new DatabaseSync(process.env.CLEARED_DB_PATH);
+  db.prepare('UPDATE source_versions SET expires_at=NULL WHERE source_id=? AND version=2').run(phase2SourceId);
+  db.close();
+  process.env.GEMINI_API_KEY = 'test-key';
+  const originalFetch = globalThis.fetch;
+  let geminiRequest = '';
+  try {
+    globalThis.fetch = async (url, options) => {
+      if (!String(url).includes('generativelanguage.googleapis.com')) return originalFetch(url, options);
+      geminiRequest = options.body;
+      return Response.json({ candidates: [{ content: { parts: [{ text: '{"claims":[]}' }] } }] });
+    };
+    const result = await write('/api/verification/check/review-a', jarA, csrfA, 'POST');
+    assert.equal(result.status, 200);
+    assert.match(geminiRequest, /Version two source/);
+    assert.doesNotMatch(geminiRequest, /Must stay unavailable/);
+  } finally { delete process.env.GEMINI_API_KEY; globalThis.fetch = originalFetch; }
+  const { scanUpload } = await import('../src/services/file-scanner.js');
+  await assert.rejects(scanUpload(Buffer.from('clean'), { NODE_ENV: 'production', FILE_SCANNER: 'none' }), /cannot mark.*clean/i);
+});
+
+test('collection access policies deny unlisted members across source reads and downloads', async () => {
+  await refreshOwnerASession();
+  const db = new DatabaseSync(process.env.CLEARED_DB_PATH);
+  db.prepare('INSERT OR REPLACE INTO memberships(workspace_id,user_id,role) VALUES(?,?,?)').run(ownerA.workspace.id, memberA.userId, 'creator');
+  db.close();
+  const policy = await write('/api/sources/collections/Policies/access', jarA, csrfA, 'PUT', JSON.stringify({ allowedRoles: [], allowedUserIds: [memberA.userId] }), { 'Content-Type': 'application/json' });
+  assert.equal(policy.status, 200);
+  assert.deepEqual(policy.data.data.allowedUserIds, [memberA.userId]);
+  assert.deepEqual((await get('/api/sources/collections/Policies/access', jarA)).data.data.allowedUserIds, [memberA.userId]);
+  assert.equal((await get(`/api/sources/${phase2SourceId}/versions`, jarA)).status, 404);
+  assert.equal((await get('/api/sources', jarA)).data.data.some((source) => source.id === phase2SourceId), false);
+
+  const memberCookie = await login(memberA.email, 'LongAndUniquePassword_M!2026', ownerA.workspace.id);
+  const memberSources = await get('/api/sources', memberCookie);
+  assert.equal(memberSources.data.data.some((source) => source.id === phase2SourceId), true);
+  const versions = await get(`/api/sources/${phase2SourceId}/versions`, memberCookie);
+  assert.equal(versions.status, 200);
+  const currentFileId = versions.data.data.find((version) => version.version === 2).fileId;
+  const originalFileId = versions.data.data.find((version) => version.version === 1).fileId;
+  const memberCsrf = await get('/api/auth/csrf', memberCookie);
+  const link = await write(`/api/files/${currentFileId}/link`, memberCsrf.jar, memberCsrf.data.token, 'POST');
+  assert.equal(link.status, 200);
+  const download = await fetch(new URL(link.data.data.url, base), { headers: { Cookie: link.jar } });
+  assert.equal(download.status, 200);
+  assert.equal(await download.text(), 'Version two source.');
+
+  const reopened = await write('/api/sources/collections/Policies/access', jarA, csrfA, 'PUT', JSON.stringify({ allowedRoles: ['owner'], allowedUserIds: [] }), { 'Content-Type': 'application/json' });
+  assert.equal(reopened.status, 200);
+  const removed = await write(`/api/sources/${phase2SourceId}`, jarA, csrfA, 'DELETE');
+  assert.equal(removed.status, 200);
+  assert.ok(store.listFileActionEvents(ownerA.workspace.id, originalFileId).some((event) => event.action === 'delete'));
+  assert.ok(store.listFileActionEvents(ownerA.workspace.id, currentFileId).some((event) => event.action === 'delete'));
 });

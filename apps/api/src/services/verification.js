@@ -1,5 +1,8 @@
 import { Router } from 'express';
-import { getReview, getSources, saveReview } from './store.js';
+import { canAccessCollection, getReview, getSourcesForVerification, getStoredFile, saveReview } from './store.js';
+import { readCleanFile } from './private-files.js';
+import { validateTextUpload } from './file-validation.js';
+import path from 'node:path';
 
 export const verificationRouter = Router();
 
@@ -9,8 +12,25 @@ verificationRouter.post('/check/:reviewId', async (request, response) => {
   const review = getReview(request.user.workspaceId, request.params.reviewId);
   if (!review) return response.status(404).json({ error: 'Review not found.' });
   if (request.user.role === 'creator' && review.ownerId !== request.user.userId) return response.status(404).json({ error: 'Review not found.' });
-  if (!review.content || review.content.startsWith('Document attached:')) return response.status(400).json({ error: 'This draft has no extracted text. Paste the draft text before checking it.' });
-  const usableSources = getSources(request.user.workspaceId).filter((source) => source.text?.trim());
+  if (review.fileId) {
+    const attachment = getStoredFile(request.user.workspaceId, review.fileId);
+    if (!attachment || attachment.scanStatus !== 'clean' || attachment.deletedAt) return response.status(409).json({ error: 'This review file is quarantined until a scanner marks it clean.' });
+    if (!review.content) {
+      const bytes = await readCleanFile(attachment);
+      review.content = validateTextUpload(bytes, path.extname(attachment.originalName).toLowerCase()).text;
+    }
+  }
+  if (!review.content || review.content.startsWith('Document attached:')) return response.status(400).json({ error: 'This draft has no readable text. Paste the draft text before checking it.' });
+  const currentTime = Date.now();
+  const candidates = getSourcesForVerification(request.user.workspaceId).filter((source) => canAccessCollection(request.user.workspaceId, source.category, request.user.userId, request.user.role) && source.scanStatus === 'clean' && !source.deletedAt && (!source.expiresAt || new Date(source.expiresAt).getTime() > currentTime));
+  const usableSources = [];
+  for (const source of candidates) {
+    const file = getStoredFile(request.user.workspaceId, source.fileId);
+    if (!file || file.scanStatus !== 'clean' || file.deletedAt) continue;
+    const bytes = await readCleanFile(file);
+    const text = validateTextUpload(bytes, path.extname(file.originalName).toLowerCase()).text;
+    usableSources.push({ ...source, text });
+  }
   if (!usableSources.length) return response.status(409).json({ error: 'Add at least one readable TXT, MD, or CSV approved source before checking a draft.' });
 
   const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';

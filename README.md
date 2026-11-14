@@ -6,6 +6,7 @@ The current codebase is an MVP-style implementation that includes:
 - a React frontend for workspace operations
 - an Express API with role-based access control
 - SQLite-backed persistence for workspaces, users, invitations, reviews, and approved sources
+- private file storage, scan-gated TXT/MD/CSV uploads, and versioned sources
 - an optional AI verification step using the Gemini API
 
 ## Product overview
@@ -44,9 +45,18 @@ The project also contains a Supabase migration scaffold for a future managed-aut
 
 ### Approved sources
 - Upload approved source documents as TXT, MD, or CSV
-- Save source metadata such as name, category, type, and timestamp
-- Store text content for Gemini fact-checking
+- Validate UTF-8 text content and reject binary input; PDF and DOCX are not enabled
+- Store files under random opaque IDs in private local storage during development or an S3-compatible private bucket in production
+- Keep source versions, uploader/owner, checksum, upload time, scan status, and optional expiry
+- Use only clean, unexpired source versions for Gemini fact-checking
 - Keep sources organized by collection/category
+- Require short-lived user/workspace-bound download links; direct static upload serving is disabled
+
+### File storage configuration
+
+Development defaults to `FILE_STORAGE=local` and an in-memory development scanner bypass that logs a prominent warning. Configure `FILE_SCANNER=clamav`, `CLAMAV_HOST`, and optionally `CLAMAV_PORT` to scan locally. Production defaults to S3-compatible private storage and requires `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY`; set `FILE_STORAGE=s3` explicitly in deployment. Configure ClamAV with `FILE_SCANNER=clamav` and `CLAMAV_HOST` before production uploads can be marked clean or downloaded. Without a production scanner, uploaded files remain quarantined. See `.env.example` for variable names.
+
+Downloads are issued by the API at `/api/files/:fileId/link` and expire after two minutes. The signed token is bound to the user, workspace, and file; the API rechecks active membership and resource access when the link is used. A temporary SQLite `file_action_events` hook records upload, version, download, delete, and scan result events for Phase 3 audit-log integration.
 
 ### Review workflow
 - Submit a review title plus draft text or file upload

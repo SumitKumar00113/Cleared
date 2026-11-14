@@ -1,6 +1,7 @@
 node_modules/
 apps/web/dist/
 apps/api/uploads/
+apps/api/private-storage/
 apps/api/data/
 .env
 .env.*

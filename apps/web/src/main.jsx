@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 import WorkspaceSettings from './WorkspaceSettings.jsx';
+import { apiFetch } from './api.js';
 
 const ReviewDesk = React.lazy(() => import('./ReviewDesk.jsx'));
 
@@ -75,7 +76,7 @@ function WorkspaceApp({ user }) {
     }
     setBusy(true);
     try {
-      const response = await fetch('/api/reviews', { method: 'POST', ...(payload instanceof FormData ? {} : { headers: { 'Content-Type': 'application/json' } }), body: payload instanceof FormData ? payload : JSON.stringify(payload) });
+      const response = await apiFetch('/api/reviews', { method: 'POST', ...(payload instanceof FormData ? {} : { headers: { 'Content-Type': 'application/json' } }), body: payload instanceof FormData ? payload : JSON.stringify(payload) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not submit the review.');
       setReviews((items) => [result.data, ...items]);
@@ -90,7 +91,7 @@ function WorkspaceApp({ user }) {
   async function updateStatus(status) {
     if (!selected) return;
     try {
-      const response = await fetch(`/api/reviews/${selected.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
+      const response = await apiFetch(`/api/reviews/${selected.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not update the review.');
       setReviews((items) => items.map((item) => item.id === selected.id ? result.data : item));
@@ -103,7 +104,7 @@ function WorkspaceApp({ user }) {
   async function checkReview(review) {
     setChecking(true);
     try {
-      const response = await fetch('/api/verification/check/' + review.id, { method: 'POST' });
+      const response = await apiFetch('/api/verification/check/' + review.id, { method: 'POST' });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Claim check failed.');
       setReviews((items) => items.map((item) => item.id === review.id ? result.data.review : item));
@@ -124,7 +125,7 @@ function WorkspaceApp({ user }) {
     payload.append('file', file);
     setBusy(true);
     try {
-      const response = await fetch('/api/sources', { method: 'POST', body: payload });
+      const response = await apiFetch('/api/sources', { method: 'POST', body: payload });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not add this source.');
       setSources((items) => [result.data, ...items]);
@@ -150,7 +151,7 @@ function WorkspaceApp({ user }) {
       </nav>
       <div className="sidebar-bottom">
         <button className="help-card" onClick={() => notify('Help centre is ready for your team.')}><span className="help-icon"><CircleHelp size={17} /></span><span><strong>Need a hand?</strong><small>Visit the help centre</small></span><ArrowUpRight size={15} /></button>
-      <button className="profile-button" onClick={async () => { await fetch('/api/auth/logout', { method: 'POST' }); window.location.reload(); }} aria-label="Sign out"><span className="profile-avatar">{user.email.slice(0,2).toUpperCase()}</span><span className="profile-copy"><strong>{user.email}</strong><small>{user.role}</small></span><MoreHorizontal size={19} /></button>
+      <button className="profile-button" onClick={async () => { await apiFetch('/api/auth/logout', { method: 'POST' }); window.location.reload(); }} aria-label="Sign out"><span className="profile-avatar">{user.email.slice(0,2).toUpperCase()}</span><span className="profile-copy"><strong>{user.email}</strong><small>{user.role}</small></span><MoreHorizontal size={19} /></button>
       </div>
     </aside>
 
@@ -232,14 +233,14 @@ function AuthGate() {
 
 function LoginPage({ onLogin, configError }) {
   const [creating, setCreating] = useState(false); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
-  async function submit(event) { event.preventDefault(); setBusy(true); setError(''); const form = new FormData(event.currentTarget); const endpoint = creating ? '/api/auth/workspaces' : '/api/auth/login'; const payload = creating ? { workspaceName: form.get('workspaceName'), email: form.get('email'), password: form.get('password') } : { email: form.get('email'), workspaceId: form.get('workspaceId'), password: form.get('password') }; try { const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not continue.'); onLogin(data.user); } catch (cause) { setError(cause.message || 'Could not continue.'); } finally { setBusy(false); } }
+  async function submit(event) { event.preventDefault(); setBusy(true); setError(''); const form = new FormData(event.currentTarget); const endpoint = creating ? '/api/auth/workspaces' : '/api/auth/login'; const payload = creating ? { workspaceName: form.get('workspaceName'), email: form.get('email'), password: form.get('password') } : { email: form.get('email'), workspaceId: form.get('workspaceId'), password: form.get('password') }; try { const response = await apiFetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not continue.'); onLogin(data.user); } catch (cause) { setError(cause.message || 'Could not continue.'); } finally { setBusy(false); } }
   return <main className="auth-screen"><section className="auth-card"><a className="auth-brand" href="/">Cleared<span>.</span></a><h1>{creating ? 'Create a company workspace' : 'Sign in to your workspace'}</h1><p>{creating ? 'Your company gets a workspace ID. You become its first owner and can invite employees.' : 'Use your company workspace ID and your personal employee account.'}</p>{configError && <div className="auth-error" role="alert">{configError}</div>}{!configError && <form onSubmit={submit}>{creating && <label>Company or workspace name<input name="workspaceName" autoComplete="organization" required minLength="2"/></label>}<label>Email address<input name="email" type="email" autoComplete="email" required/></label>{!creating && <label>Company workspace ID<input name="workspaceId" autoComplete="off" required/></label>}<label>Password<input name="password" type="password" autoComplete={creating ? 'new-password' : 'current-password'} required minLength={creating ? 12 : undefined}/></label>{error && <p className="auth-error" role="alert">{error}</p>}<button className="button button-primary" disabled={busy}>{busy ? 'Please wait…' : creating ? 'Create workspace' : 'Sign in'}</button></form>}{!configError && <button className="auth-switch" type="button" onClick={() => { setCreating(!creating); setError(''); }}>{creating ? 'Already have an account? Sign in' : 'Create a company workspace'}</button>}</section></main>;
 }
 
 function JoinPage({ onLogin }) {
   const params = new URLSearchParams(window.location.search); const token = params.get('token') || ''; const invitedEmail = params.get('email') || '';
   const [error,setError]=useState(''); const [busy,setBusy]=useState(false);
-  async function submit(event) { event.preventDefault(); setBusy(true); setError(''); const password=new FormData(event.currentTarget).get('password'); try { const response=await fetch('/api/auth/invitations/accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,email:invitedEmail,password})}); const result=await response.json(); if(!response.ok) throw new Error(result.error||'Could not accept invitation.'); onLogin(result.user); } catch(cause) { setError(cause.message); } finally { setBusy(false); } }
+  async function submit(event) { event.preventDefault(); setBusy(true); setError(''); const password=new FormData(event.currentTarget).get('password'); try { const response=await apiFetch('/api/auth/invitations/accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,email:invitedEmail,password})}); const result=await response.json(); if(!response.ok) throw new Error(result.error||'Could not accept invitation.'); onLogin(result.user); } catch(cause) { setError(cause.message); } finally { setBusy(false); } }
   return <main className="auth-screen"><section className="auth-card"><a className="auth-brand" href="/">Cleared<span>.</span></a><h1>Join your company workspace</h1><p>Your account will be linked to the invitation for {invitedEmail || 'your email address'}. If you already have a Cleared account, enter its current password; otherwise create a password with at least 12 characters.</p>{!token ? <p className="auth-error">This invitation link is incomplete. Ask your company administrator for a new one.</p> : <form onSubmit={submit}><label>Invited email<input value={invitedEmail} readOnly/></label><label>Password<input name="password" type="password" autoComplete="current-password" required/></label>{error && <p className="auth-error" role="alert">{error}</p>}<button className="button button-primary" disabled={busy}>{busy?'Joining…':'Accept invitation'}</button></form>}</section></main>;
 }
 

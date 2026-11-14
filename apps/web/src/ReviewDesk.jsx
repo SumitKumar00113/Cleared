@@ -1,5 +1,6 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { gsap } from 'gsap';
+import { apiFetch } from './api.js';
 import { ArrowRight, Check, Clock3, FileText, FolderOpen, Search, ShieldCheck, Sparkles, X } from 'lucide-react';
 import './review-desk.css';
 
@@ -72,7 +73,7 @@ export default function ReviewDesk() {
     if (!review || saving || review.status === status) return;
     setSaving(true);
     try {
-      const response = await fetch(`/api/reviews/${review.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
+      const response = await apiFetch(`/api/reviews/${review.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not update this review.');
       setReviews((items) => items.map((item) => item.id === review.id ? result.data : item));

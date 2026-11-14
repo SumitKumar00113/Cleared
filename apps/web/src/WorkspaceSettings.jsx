@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { apiFetch } from './api.js';
 import { Check, Copy, Mail, ShieldCheck, Trash2, Users } from 'lucide-react';
 
 const roles = ['creator', 'reviewer', 'brand_manager', 'administrator'];
@@ -29,20 +30,20 @@ export default function WorkspaceSettings({ user }) {
     event.preventDefault(); setBusy(true); setError(''); setNotice(''); setInvite(null);
     const form = new FormData(event.currentTarget);
     try {
-      const response = await fetch('/api/workspace/invitations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: form.get('email'), role: form.get('role') }) });
+      const response = await apiFetch('/api/workspace/invitations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: form.get('email'), role: form.get('role') }) });
       const result = await response.json(); if (!response.ok) throw new Error(result.error || 'Could not create invitation.');
       setInvite(result.data); event.currentTarget.reset(); setNotice('Invitation link created. Copy it and send it to your coworker.');
     } catch (cause) { setError(cause.message); } finally { setBusy(false); }
   }
   async function copy(text, success) { try { await navigator.clipboard.writeText(text); setNotice(success); } catch { setError('Clipboard access was denied. Select and copy the text manually.'); } }
   async function updateRole(member, role) {
-    const response = await fetch(`/api/workspace/members/${member.userId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role }) });
+    const response = await apiFetch(`/api/workspace/members/${member.userId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role }) });
     const result = await response.json(); if (!response.ok) return setError(result.error || 'Could not update role.');
     setMembers((items) => items.map((item) => item.userId === member.userId ? { ...item, role } : item)); setNotice('Member role updated.');
   }
   async function remove(member) {
     if (!window.confirm(`Remove ${member.email} from this workspace?`)) return;
-    const response = await fetch(`/api/workspace/members/${member.userId}`, { method: 'DELETE' }); const result = await response.json();
+    const response = await apiFetch(`/api/workspace/members/${member.userId}`, { method: 'DELETE' }); const result = await response.json();
     if (!response.ok) return setError(result.error || 'Could not remove member.');
     setMembers((items) => items.filter((item) => item.userId !== member.userId)); setNotice('Member removed from this workspace.');
   }

@@ -8,7 +8,21 @@ Please allow maintainers time to investigate and prepare a fix before public dis
 
 ## Security status
 
-The current application still uses its legacy SQLite and in-memory session implementation. The Supabase migration under `supabase/migrations` is an architecture scaffold and is not active until the API is migrated, the migration is applied to a Supabase project, and the tenant-isolation policies are tested there. Do not use this repository's current authentication or upload flow for sensitive production documents.
+Cleared uses the existing Express + SQLite runtime. Phase 1a adds database-backed, revocable sessions, asynchronous scrypt password verification with per-user parameters, progressive login and invitation-acceptance lockouts, double-submit CSRF tokens, security headers, and a configured CORS allow-list. Phase 1b identity controls, audit logging, secure upload storage, independent security review, and deployment hardening remain outstanding. This project makes no SOC 2, ISO 27001, GDPR, or other compliance certification claim.
+
+The Supabase migration under `supabase/migrations` remains an inactive architecture scaffold. It is not used by the API runtime.
+
+## Current operational requirements and limits
+
+- Use Node 24.19.x, as declared by the root and API package `engines` fields.
+- Set `SESSION_SECRET` to a cryptographically random value of at least 32 characters. Production startup also requires `CORS_ORIGINS` with exact trusted origins.
+- Sessions are database-backed, but the current SQLite database remains a single-instance local database. Backups, restore drills, and multi-instance deployment are not configured.
+- Session records retain a SHA-256 hash of the random cookie ID, user/workspace, expiry, user agent, creation and last-use timestamps, and revocation time. The session cookie remains `HttpOnly; SameSite=Lax`, with `Secure` in production.
+- Passwords use asynchronous scrypt with N=131072, r=8, p=1 and 64-byte output. Existing rows are read with the legacy N=16384 parameters and rehashed after successful login. The current common-password denylist is small and does not replace breached-password screening.
+- CSRF uses a readable, SameSite=Strict double-submit cookie and `X-CSRF-Token` on unsafe requests. This protects against cross-site request forgery; it does not protect against same-origin script injection.
+- Login and invitation acceptance use account plus account/IP progressive lockouts and IP request limits. Invitation creation has account/IP request limits. The password-reset endpoint does not exist yet; equivalent throttling must be applied when reset is introduced in Phase 1b.
+- The configured CSP allows inline styles for the current frontend styling. HSTS is emitted only in production.
+- Tests exercise every current workspace data route with two-workspace identifiers and negative access attempts. They are not a penetration test and do not exhaustively prove every possible request combination.
 
 ## Deployment safeguards
 

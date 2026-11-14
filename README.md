@@ -70,7 +70,7 @@ The application is intentionally split into a frontend app and a backend API so 
 | --- | --- | --- |
 | Frontend app | User experience and workspace UI | React + Webpack single-page app |
 | API server | Request handling and auth middleware | Express app mounted at `/api` |
-| Auth service | Session creation and validation | Uses signed cookies and workspace membership checks |
+| Auth service | Session creation and validation | Uses database-backed, hashed session IDs and workspace membership checks |
 | Store layer | SQLite persistence | Manages current tenant data and membership rules |
 | Review service | Draft submission and review lifecycle | Stores review records and maintains status |
 | Source service | Approved source uploads | Reads content for later verification |
@@ -133,7 +133,7 @@ cleared/
 
 ### Verification and security
 - Gemini API for factual claim evaluation
-- HMAC-signed session cookies using `SESSION_SECRET` or `JWT_SECRET`
+- HMAC-signed session cookies using `SESSION_SECRET`
 - Role/gate checks before write operations
 - Workspace-level isolation for reviews, members, and sources
 
@@ -161,8 +161,8 @@ Copy `.env.example` to `.env` and customize it for your environment.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `SESSION_SECRET` | Yes | Secret used to sign API sessions |
-| `JWT_SECRET` | Optional fallback | Alternative session secret |
+| `SESSION_SECRET` | Yes | At least 32 characters; signs session cookies. Production startup refuses missing or weak secrets. |
+| `CORS_ORIGINS` | Production | Comma-separated exact origins allowed to call the API. |
 | `PORT` | No | API port; defaults to `4000` |
 | `APP_BASE_URL` | Optional | Used for invitation and redirect links |
 | `GEMINI_API_KEY` | Optional | Enables AI verification |
@@ -173,8 +173,11 @@ Copy `.env.example` to `.env` and customize it for your environment.
 | `SUPABASE_SECRET_KEY` | Optional | Server-only key for future privileged operations |
 
 Notes:
-- `SESSION_SECRET` must be at least 32 characters long.
-- The app will refuse to use auth routes until a valid secret is present.
+- Use Node `24.19.x` (also declared in `package.json` engines).
+- `SESSION_SECRET` must be at least 32 characters long. Production also requires `CORS_ORIGINS`.
+- Sessions are stored in SQLite as hashes of random cookie IDs, expire after 12 hours, record user agent/creation/last use, and can be listed or revoked.
+- Passwords use asynchronous scrypt (N=131072, r=8, p=1), a 12-character minimum, and a common-password denylist. Legacy hashes are upgraded after successful sign-in.
+- Unsafe requests require a CSRF cookie/header pair. API responses include CSP, MIME sniffing and frame protections, and Referrer-Policy; HSTS is enabled in production.
 - AI verification is disabled unless `GEMINI_API_KEY` is configured.
 
 ## Installation and local startup
@@ -194,7 +197,7 @@ copy .env.example .env
 Then edit `.env` and set at minimum:
 
 ```env
-SESSION_SECRET=your_super_long_random_key_here
+SESSION_SECRET=replace-with-a-random-secret-at-least-32-characters
 ```
 
 Optional verification settings:
@@ -224,6 +227,10 @@ The API is mounted under `/api` and authenticates requests before most workspace
 - `POST /api/auth/login` — sign in to a workspace
 - `POST /api/auth/invitations/accept` — accept an invite and join a workspace
 - `POST /api/auth/logout` — clear the signed session cookie
+- `GET /api/auth/csrf` — issue/read the CSRF token used by unsafe requests
+- `GET /api/auth/sessions` — list the current user's active sessions
+- `DELETE /api/auth/sessions/:sessionId` — revoke one of the current user's listed sessions
+- `POST /api/auth/logout-everywhere` — revoke all sessions for the current user
 
 ### Workspace routes
 
@@ -324,7 +331,9 @@ This MVP is intentionally compact, but several things are still not implemented 
 - PDF/DOCX extraction is not implemented
 - source uploads are limited to TXT, MD, and CSV
 - invitation emails are not actually sent
-- sessions live in API memory and are reset on restart
+- email verification, password reset, and MFA are not implemented yet
+- sessions are persisted in SQLite, but the setup is single-instance and has no managed session store
+- login and invitation acceptance have account/IP progressive lockouts; password-reset protection will be added with that endpoint
 - no strong audit-event timeline yet
 - no production deployment configuration for scaling
 - no malware scanning integration yet
@@ -346,13 +355,13 @@ The near-term roadmap is:
 ## Security considerations
 
 A few important guardrails are already in place:
-- sessions are signed with HMAC and a secret value
+- random session IDs are stored hashed in SQLite; cookies are HMAC-signed
 - workspace membership is enforced before most protected routes
 - owners cannot be removed from a workspace by a lower-role user
 - role restrictions prevent creators from approving reviews they do not own
 - AI results are treated as advisory only and do not bypass human approval
 
-Nevertheless, the current app should still be considered a development MVP. Production rollout should include stronger deployment controls, persistent storage, secret management, and more formal security review.
+Nevertheless, the current app should still be considered a development MVP. Production rollout needs the remaining identity and file controls, tested backups, deployment review, and independent security testing. No compliance certification is claimed.
 
 ## License
 

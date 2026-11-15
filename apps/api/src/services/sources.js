@@ -5,6 +5,7 @@ import multer from 'multer';
 import { canAccessCollection, collectionMembersExist, deleteSource, getCollectionAccess, getSource, getSourceVersionRows, getSources, getStoredFile, markStoredFileDeleted, saveSourceVersion, setCollectionAccess, recordAuditEvent } from './store.js';
 import { requireRecentAuth, requireRole } from './auth.js';
 import { storeTextUpload, deleteStoredObject } from './private-files.js';
+import { rejectDisabledSourceUploads } from './upload-policy.js';
 
 export const sourcesRouter = Router();
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
@@ -49,7 +50,7 @@ sourcesRouter.get('/:id/versions', (request, response) => {
   return response.json({ data: getSourceVersionRows(request.user.workspaceId, request.params.id) });
 });
 
-sourcesRouter.post('/', canManageSources, upload.single('file'), async (request, response) => {
+sourcesRouter.post('/', rejectDisabledSourceUploads, canManageSources, upload.single('file'), async (request, response) => {
   const name = String(request.body?.name || '').trim();
   const category = String(request.body?.category || '').trim();
   if (!name || !category || !request.file) return response.status(400).json({ error: 'A source name, collection, and file are required.' });
@@ -71,7 +72,7 @@ sourcesRouter.post('/', canManageSources, upload.single('file'), async (request,
   }
 });
 
-sourcesRouter.post('/:id/versions', canManageSources, upload.single('file'), async (request, response) => {
+sourcesRouter.post('/:id/versions', rejectDisabledSourceUploads, canManageSources, upload.single('file'), async (request, response) => {
   const existing = getSource(request.user.workspaceId, request.params.id);
   if (!existing) return response.status(404).json({ error: 'Source not found.' });
   if (!canAccessCollection(request.user.workspaceId, existing.category, request.user.userId, request.user.role)) return response.status(404).json({ error: 'Source not found.' });

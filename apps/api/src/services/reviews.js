@@ -6,6 +6,7 @@ import { createReviewNotifications, getReview, getReviews, getStoredFile, listMe
 import { requireRecentAuth, requireRole } from './auth.js';
 import { readCleanFile, storeTextUpload } from './private-files.js';
 import { validateTextUpload } from './file-validation.js';
+import { rejectDisabledUploads } from './upload-policy.js';
 
 export const reviewsRouter = Router();
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
@@ -41,7 +42,7 @@ reviewsRouter.get('/:id/history', (request, response) => {
   return response.json({data:reviewHistory(request.user.workspaceId,request.params.id)});
 });
 
-reviewsRouter.post('/', requireRole(['owner','administrator','brand_manager','creator']), upload.single('file'), async (request, response) => {
+reviewsRouter.post('/', requireRole(['owner','administrator','brand_manager','creator']), rejectDisabledUploads, upload.single('file'), async (request, response) => {
   const title = String(request.body?.title || '').trim();
   const content = String(request.body?.content || '').trim();
   if (!title || (!content && !request.file)) return response.status(400).json({ error: 'A title and draft text or document are required.' });

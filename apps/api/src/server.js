@@ -33,8 +33,9 @@ export function validateEnvironment(env = process.env) {
     if ((env.FILE_STORAGE || 's3') !== 's3') throw new Error('Production requires private S3-compatible FILE_STORAGE=s3.');
     for (const name of ['S3_ENDPOINT','S3_BUCKET','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY']) if (!env[name]) throw new Error(`Production requires ${name}.`);
     try { if (new URL(env.S3_ENDPOINT).protocol !== 'https:') throw new Error(); } catch { throw new Error('Production requires an HTTPS S3_ENDPOINT.'); }
-    if (env.FILE_SCANNER !== 'clamav' || !env.CLAMAV_HOST) throw new Error('Production requires FILE_SCANNER=clamav and CLAMAV_HOST.');
-    if (!Number.isInteger(Number(env.CLAMAV_PORT || 3310)) || Number(env.CLAMAV_PORT || 3310) < 1 || Number(env.CLAMAV_PORT || 3310) > 65535) throw new Error('Production requires a valid CLAMAV_PORT.');
+    const uploadsEnabled = env.FILE_UPLOADS_ENABLED === 'true';
+    if (uploadsEnabled && (env.FILE_SCANNER !== 'clamav' || !env.CLAMAV_HOST)) throw new Error('Production file uploads require FILE_SCANNER=clamav and CLAMAV_HOST.');
+    if (uploadsEnabled && (!Number.isInteger(Number(env.CLAMAV_PORT || 3310)) || Number(env.CLAMAV_PORT || 3310) < 1 || Number(env.CLAMAV_PORT || 3310) > 65535)) throw new Error('Production file uploads require a valid CLAMAV_PORT.');
   }
   if (env.SESSION_SECRET && env.SESSION_SECRET.length < 32 && env.NODE_ENV !== 'production') throw new Error('SESSION_SECRET must be at least 32 characters when configured.');
   return true;

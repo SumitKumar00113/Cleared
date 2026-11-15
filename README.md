@@ -28,8 +28,12 @@ This is especially useful for marketing, internal communications, compliance, pr
 This repository is a working MVP, not a fully production-hardened platform. The implementation already includes:
 - workspace creation and invitation flow
 - role-based workspace permissions
+- email verification, database-backed sessions, password-reset/unlock flows, MFA enrollment, TOTP challenges, and recovery codes
+- asynchronous scrypt password hashing and request/account lockout controls
 - approved source management
 - review submission and status updates
+- private random-ID file storage, upload validation, quarantine, ClamAV scanner integration, and signed downloads
+- append-only audit events, revision history, revision-bound decisions, and workspace audit export
 - verification checks against trusted source text
 - SQLite database persistence with workspace scoping
 
@@ -72,10 +76,11 @@ For local MinIO and ClamAV service integration, start the services with `docker 
 - Keep review records tied to the creator and workspace
 
 ### AI verification
-- Send draft content and approved sources to Gemini
-- Force the model to return JSON-formatted claim checks
-- Use approved source text as the evidence base
-- Require a human review decision even when AI finds issues
+- Default AI checking is off per workspace; owners and administrators can enable it after recent authentication
+- Retrieve a small set of relevant, clean, unexpired source passages for each draft sentence
+- Run deterministic evidence and fact checks even when AI is off
+- Use strict structured output and server-verified source quotes when Gemini is enabled
+- Require a human review decision even when automated checks find issues
 
 ## Architecture
 
@@ -88,11 +93,11 @@ The application is intentionally split into a frontend app and a backend API so 
 | Frontend app | User experience and workspace UI | React + Webpack single-page app |
 | API server | Request handling and auth middleware | Express app mounted at `/api` |
 | Auth service | Session creation and validation | Uses database-backed, hashed session IDs and workspace membership checks |
-| Store layer | SQLite persistence | Manages current tenant data and membership rules |
-| Review service | Draft submission and review lifecycle | Stores review records and maintains status |
+| Store layer | SQLite persistence | Normalized workspace-scoped tables, revisions, decisions, files, and audit events |
+| Review service | Draft submission and review lifecycle | Keeps revision text, hashes, editor attribution, decisions, and review history |
 | Source service | Approved source uploads | Reads content for later verification |
-| Verification service | AI claim checking | Calls Gemini with approved texts |
-| Supabase scaffold | Future database/Auth migration | Not the active runtime implementation |
+| Verification service | Passage retrieval and claim checking | Runs deterministic checks locally and calls Gemini only when the workspace setting is enabled |
+| Supabase scaffold | Future PostgreSQL/RLS planning | Inactive; not an authentication or runtime dependency |
 
 ## Repository structure
 
@@ -102,57 +107,84 @@ cleared/
 ├── .env.example
 ├── .gitignore
 ├── package.json
+├── package-lock.json
+├── SECURITY.md
+├── THREAT_MODEL.md
 ├── apps/
 │   ├── api/
 │   │   ├── package.json
+│   │   ├── scripts/                 # Phase 3 migration and legacy source rescan
 │   │   ├── src/
 │   │   │   ├── server.js
-│   │   │   └── services/
-│   │   │       ├── auth.js
-│   │   │       ├── reviews.js
-│   │   │       ├── sources.js
-│   │   │       ├── store.js
-│   │   │       ├── verification.js
-│   │   │       └── workspace.js
+│   │   │   └── services/            # auth, MFA, normalized store, reviews, sources, files, scanner/storage, verification, workspace
 │   │   └── test/
+│   │       ├── integration/         # MinIO + ClamAV integration tests
+│   │       ├── security-phase-1a.test.js
 │   │       └── workspace-access.test.js
 │   └── web/
 │       ├── package.json
 │       ├── index.html
+│       ├── webpack.config.cjs
 │       └── src/
-│           ├── main.jsx
+│           ├── main.jsx             # Public landing page, auth gate, and workspace app
+│           ├── LandingPage.jsx      # Public homepage and interactive sample
+│           ├── LandingPage.css
+│           ├── design-system.jsx    # Shared UI primitives
+│           ├── design-system.css
 │           ├── ReviewDesk.jsx
 │           ├── WorkspaceSettings.jsx
+│           ├── api.js
 │           ├── styles.css
+│           ├── overview.css
 │           └── review-desk.css
+├── docs/
+│   ├── design-system.md
+│   ├── phase-1b-report.md
+│   ├── postgresql-portability.md
+│   └── security-route-test-matrix.md
+├── infra/
+│   └── clamd.integration.conf
+├── docker-compose.phase2-integration.yml
 ├── supabase/
 │   ├── README.md
-│   ├── migrations/
+│   ├── migrations/                  # Inactive PostgreSQL/RLS planning scaffold
 │   └── tests/
-└── .env
 ```
+
+Local `.env` files, SQLite databases, private storage, and uploads are runtime data and must not be committed.
 
 ## Tech stack
 
 ### Frontend
 - React 18
 - Webpack 5
-- CSS modules / custom styling
+- Custom CSS styling
 - Lucide icons
 - GSAP for motion effects
 
 ### Backend
-- Node.js 24+
+- Node.js 24.19.x
 - Express 4
 - `node:sqlite` for SQLite persistence
 - `multer` for file uploads
-- CORS support for local API access
+- Nodemailer for production SMTP delivery; development uses a logged in-memory outbox
+- Private local file storage for development and S3-compatible private storage for production
+- Pluggable file scanning with ClamAV; MinIO + ClamAV integration-test setup
 
 ### Verification and security
 - Gemini API for factual claim evaluation
 - HMAC-signed session cookies using `SESSION_SECRET`
-- Role/gate checks before write operations
-- Workspace-level isolation for reviews, members, and sources
+- Asynchronous scrypt password hashing, email verification, database-backed sessions, MFA, and CSRF protection
+- Private, scan-gated files; append-only audit events; revision-bound human decisions
+- Workspace-scoped access checks for reviews, members, files, and sources
+
+## Authentication and account security
+
+- Email verification is required before a signed-in user can access workspace APIs. Unverified users are directed to verify their address.
+- MFA enrollment is enforced for the `owner`, `administrator`, `brand_manager`, and `reviewer` roles. The API blocks workspace access for these roles until MFA is enabled. Any user who has enabled MFA must complete a challenge before accessing workspace APIs.
+- Login and invitation failures are throttled by account/IP pair. Five failed authentication attempts within a 15-minute window trigger a 15-minute lockout; separate per-route and per-IP request-rate limits also apply.
+- Unsafe API requests require the CSRF token in both the `cleared_csrf` cookie and `X-CSRF-Token` header. Authenticated tokens are HMAC-bound to the session ID; unauthenticated account flows use a separate signed pre-auth token.
+- Production session cookies use the `__Host-cleared_session` prefix with `Secure`, `HttpOnly`, `Path=/`, and `SameSite=Lax`, and omit `Domain`.
 
 ## Runtime behavior
 
@@ -162,15 +194,15 @@ The current runtime is intentionally lightweight and suitable for local developm
 - Web app: `http://localhost:5173`
 - API: `http://localhost:4000`
 
+The web app's root route (`http://localhost:5173/`) shows the public Cleared homepage to signed-out visitors and the Overview dashboard to signed-in users. Sign-in is at `http://localhost:5173/login`; workspace signup is at `http://localhost:5173/login?mode=create`. The review workspace is at `http://localhost:5173/workspace` after signing in.
+
 ### Database and storage
 The API stores data in SQLite under:
 - `apps/api/data/cleared.sqlite`
 
-Uploaded files are stored under:
-- `apps/api/uploads/`
-- `apps/api/uploads/reviews/`
+Development uploads default to private storage under `apps/api/private-storage/` (override with `LOCAL_STORAGE_DIR`). Production uses a private S3-compatible bucket. Uploads are not served as static files.
 
-This is adequate for a local MVP, but it should be backed by persistent storage in deployment and should not be treated as a production-scale multi-instance database solution.
+SQLite is the only active database runtime and is intended for this single-instance MVP. See `docs/postgresql-portability.md` for preparation notes; PostgreSQL is not active.
 
 ## Environment variables
 
@@ -179,15 +211,25 @@ Copy `.env.example` to `.env` and customize it for your environment.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `SESSION_SECRET` | Yes | At least 32 characters; signs session cookies. Production startup refuses missing or weak secrets. |
+| `MFA_ENCRYPTION_KEY` | For MFA | 32-byte AES key encoded as 64 hex characters or base64; encrypts TOTP secrets at rest. |
 | `CORS_ORIGINS` | Production | Comma-separated exact origins allowed to call the API. |
-| `PORT` | No | API port; defaults to `4000` |
-| `APP_BASE_URL` | Optional | Used for invitation and redirect links |
+| `PORT` | No | API port; defaults to `4000`. |
+| `WEB_PORT` | No | Web development server port; defaults to `5173`. |
+| `NODE_ENV` | No | Set to `production` for production security and storage requirements. |
+| `APP_BASE_URL` | Production | HTTPS public URL used for invitation and account-action links. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Production | SMTP delivery for verification, password, unlock, and invitation messages. |
+| `FILE_STORAGE`, `LOCAL_STORAGE_DIR` | No | Select local development or private S3-compatible storage; optional local directory override. |
+| `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_SESSION_TOKEN` | S3 | S3-compatible storage settings. Production endpoint must use HTTPS. |
+| `FILE_SCANNER`, `CLAMAV_HOST`, `CLAMAV_PORT` | Production | Configure ClamAV; production fails closed without a configured scanner. |
 | `GEMINI_API_KEY` | Optional | Enables AI verification |
 | `GEMINI_MODEL` | Optional | Overrides the default Gemini model |
+| `GEMINI_PAID_TIER_CONFIRMED` | Optional | Set to `true` only after an operator has confirmed an active paid Gemini API tier; otherwise startup logs a warning when a key is configured. |
+| `VERIFICATION_WORKER_CONCURRENCY` | Optional | In-process verification worker concurrency; defaults to `2`, maximum `4`. |
+| `VERIFICATION_WORKSPACE_RATE_PER_MINUTE` | Optional | Maximum newly requested jobs per workspace per minute; defaults to `10`. |
+| `VERIFICATION_DAILY_JOB_CAP` | Optional | Per-workspace daily job cap; defaults to `100`. |
+| `VERIFICATION_DAILY_CHAR_CAP` | Optional | Per-workspace daily cap for characters sent to Gemini; defaults to `1,000,000`. |
+| `VERIFICATION_MAX_RETRIEVED_CHARS` | Optional | Maximum combined retrieved passage text per job; defaults to `80,000`. |
 | `CLEARED_DB_PATH` | Optional | Custom SQLite file path |
-| `SUPABASE_URL` | Optional | Future managed architecture config |
-| `SUPABASE_PUBLISHABLE_KEY` | Optional | Future managed auth config |
-| `SUPABASE_SECRET_KEY` | Optional | Server-only key for future privileged operations |
 
 Notes:
 - Use Node `24.19.x` (also declared in `package.json` engines).
@@ -195,7 +237,8 @@ Notes:
 - Sessions are stored in SQLite as hashes of random cookie IDs, expire after 12 hours, record user agent/creation/last use, and can be listed or revoked.
 - Passwords use asynchronous scrypt (N=131072, r=8, p=1), a 12-character minimum, and a common-password denylist. Legacy hashes are upgraded after successful sign-in.
 - Unsafe requests require a CSRF cookie/header pair. API responses include CSP, MIME sniffing and frame protections, and Referrer-Policy; HSTS is enabled in production.
-- AI verification is disabled unless `GEMINI_API_KEY` is configured.
+- AI checking is disabled per workspace by default. With AI off, no draft or source text is sent to Gemini.
+- Gemini startup warns unless an operator sets `GEMINI_PAID_TIER_CONFIRMED=true`; this is an operator attestation, not a provider-side billing check.
 
 ## Installation and local startup
 
@@ -217,6 +260,8 @@ Then edit `.env` and set at minimum:
 SESSION_SECRET=replace-with-a-random-secret-at-least-32-characters
 ```
 
+Set `MFA_ENCRYPTION_KEY` to 32 random bytes encoded as 64 hexadecimal characters (for example, generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`) to test MFA locally. Keep it stable and back it up securely. In development, email is written to the API terminal/in-memory outbox rather than sent through SMTP; production requires the SMTP variables above.
+
 Optional verification settings:
 
 ```env
@@ -232,114 +277,144 @@ npm run dev
 
 This boots both the API and the web app together.
 
-## API overview
+## API routes
 
-The API is mounted under `/api` and authenticates requests before most workspace actions.
+All routes are mounted under `/api`. Workspace routes require an authenticated session unless noted. Mutating requests are protected by global CSRF middleware.
 
-### Authentication routes
+### Health and authentication
 
-- `GET /api/health` — service health check
-- `GET /api/auth/session` — returns the current authenticated user, if any
-- `POST /api/auth/workspaces` — create a workspace and owner account
-- `POST /api/auth/login` — sign in to a workspace
-- `POST /api/auth/invitations/accept` — accept an invite and join a workspace
-- `POST /api/auth/logout` — clear the signed session cookie
-- `GET /api/auth/csrf` — issue/read the CSRF token used by unsafe requests
-- `GET /api/auth/sessions` — list the current user's active sessions
-- `DELETE /api/auth/sessions/:sessionId` — revoke one of the current user's listed sessions
-- `POST /api/auth/logout-everywhere` — revoke all sessions for the current user
+| Method and route | Purpose |
+| --- | --- |
+| `GET /api/health` | API health check. |
+| `GET /api/auth/csrf` | Read or issue a CSRF token. |
+| `GET /api/auth/session` | Current session and user state. |
+| `POST /api/auth/workspaces` | Create a workspace and its first owner account. |
+| `POST /api/auth/login` | Sign in; may initiate an MFA challenge. |
+| `POST /api/auth/invitations/accept` | Accept a workspace invitation. |
+| `POST /api/auth/email/resend` | Resend a verification message. |
+| `POST /api/auth/email/verify` | Verify an email address or consume an unlock token. |
+| `POST /api/auth/account/unlock` | Send an account-unlock message. |
+| `POST /api/auth/password/forgot` | Request a password-reset message. |
+| `POST /api/auth/password/reset` | Consume a reset token and set a new password. |
+| `POST /api/auth/email/change` | Request an email change, verified at the new address. |
+| `POST /api/auth/mfa/challenge` | Complete sign-in MFA with TOTP or a one-time recovery code. |
+| `POST /api/auth/mfa/enroll/start` | Start MFA enrollment and return setup details. |
+| `POST /api/auth/mfa/enroll/confirm` | Confirm MFA enrollment and issue recovery codes. |
+| `POST /api/auth/reauth` | Verify the current password for recent-auth gated actions. |
+| `GET /api/auth/sessions` | List the current account's active sessions. |
+| `DELETE /api/auth/sessions/:sessionId` | Revoke one of the current account's sessions. |
+| `POST /api/auth/logout` | Revoke the current session. |
+| `POST /api/auth/logout-everywhere` | Revoke all sessions for the account. |
 
-### Workspace routes
+### Workspace and audit
 
-- `GET /api/workspace` — current workspace metadata
-- `GET /api/workspace/members` — list workspace members
-- `POST /api/workspace/invitations` — create an invite for a user
-- `PATCH /api/workspace/members/:userId` — change a member role
-- `DELETE /api/workspace/members/:userId` — remove a member
+| Method and route | Purpose |
+| --- | --- |
+| `GET /api/workspace` | Current workspace metadata and role. |
+| `GET /api/workspace/members` | List members (owner/administrator). |
+| `POST /api/workspace/invitations` | Invite a user (owner/administrator). |
+| `PATCH /api/workspace/members/:userId` | Change a member's role (owner/administrator, recent authentication). |
+| `DELETE /api/workspace/members/:userId` | Remove a member (owner/administrator, recent authentication). |
+| `GET /api/workspace/audit` | List current-workspace audit events (owner/administrator). |
+| `GET /api/workspace/audit/export` | Export current-workspace events as CSV (owner/administrator). |
+| `GET /api/workspace/audit/integrity` | Verify the current workspace audit hash chain (owner/administrator). |
+| `PATCH /api/workspace/ai` | Enable or disable AI checking for this workspace (owner/administrator, recent authentication). |
 
-### Review routes
+### Reviews and sources
 
-- `GET /api/reviews` — list reviews in the current workspace
-- `POST /api/reviews` — create a review from text or uploaded file
-- `PATCH /api/reviews/:id` — update status (In review, Needs changes, Approved, Rejected)
+| Method and route | Purpose |
+| --- | --- |
+| `GET /api/reviews` | List reviews visible to the current role. |
+| `POST /api/reviews` | Submit a review from text or a TXT/MD/CSV file. |
+| `PATCH /api/reviews/:id` | Edit draft text or change review status. |
+| `GET /api/reviews/:id/history` | Read a review's audit timeline, revisions, and decisions. |
+| `GET /api/sources` | List sources visible under collection access rules, with expiry and scan state. |
+| `POST /api/sources` | Add a source and its first version. |
+| `GET /api/sources/:id/versions` | List retained source versions. |
+| `POST /api/sources/:id/versions` | Upload a new source version. |
+| `DELETE /api/sources/:id` | Delete a source and its private file objects. |
+| `GET /api/sources/collections/:category/access` | Read collection access settings (owner/brand manager). |
+| `PUT /api/sources/collections/:category/access` | Set collection role/user allowlists (owner/brand manager, recent authentication). |
 
-### Source routes
+### Files and verification
 
-- `GET /api/sources` — list approved sources
-- `POST /api/sources` — add a TXT, MD, or CSV approved source
-
-### Verification route
-
-- `POST /api/verification/check/:reviewId` — run a Gemini-based claim check for a review
+| Method and route | Purpose |
+| --- | --- |
+| `POST /api/files/:fileId/link` | Create a user-, workspace-, and file-bound signed download link (about two minutes). |
+| `GET /api/files/:fileId/download` | Download a clean, accessible file through a valid signed link. |
+| `POST /api/files/:fileId/scan` | Scan a file (owner/administrator/brand manager, recent authentication). |
+| `POST /api/verification/check/:reviewId` | Queue a revision-bound verification job; returns `202` and a job ID. Add `?wait=true` for synchronous compatibility. |
+| `GET /api/verification/jobs/:jobId` | Poll a job in the authenticated workspace; foreign IDs return `404`. |
+| `GET /api/notifications` | List the signed-in user's latest 50 workspace review notifications. |
+| `PATCH /api/notifications/:id/read` | Mark a workspace-scoped notification as read. |
 
 ## Data model
 
-The core schema is stored in SQLite and is intentionally simple for the MVP.
+SQLite tables are created/upgraded by `apps/api/src/services/store.js`. Workspace-owned data carries `workspace_id` and is queried within the authenticated workspace.
 
-### Workspaces
-- `id` — workspace UUID
-- `name` — workspace name
-- `created_at` — creation timestamp
+| Tables | Purpose |
+| --- | --- |
+| `workspaces`, `users`, `memberships`, `invitations` | Organizations, accounts, role membership, and invitations. User rows include email-verification and MFA state; TOTP secrets are encrypted. |
+| `reviews` | Review metadata and pointer to the current revision. |
+| `review_revisions` | Draft text, sequential revision number, SHA-256 content hash, editor, creation time, and lock state. |
+| `claims`, `findings` | Claim verdicts/findings linked to a revision; evidence records the source ID and version. |
+| `decisions` | Approval, rejection, or changes-requested action, actor, time, and exact revision ID. |
+| `sources` | Source and collection metadata, owner/uploader, and deletion state. |
+| `source_versions` | Versioned file reference, owner/uploader, checksum, upload/expiry times, and scan state. Older versions remain. |
+| `source_passages` | Extracted passages with source version and content hash. |
+| `stored_files` | Private file metadata, opaque storage key, checksum, scan state, and deletion state. |
+| `collection_access` | Optional per-collection role/user allowlists. Unlisted users are denied when a policy is set. |
+| `audit_events` | Append-only events with workspace, actor, action, target, time, request origin, details, and per-workspace previous/event hashes. SQLite triggers reject updates and deletes. |
+| `workspace_settings` | Per-workspace AI checking switch; defaults off. |
+| `verification_jobs`, `verification_usage` | Persistent job state, retry metadata, retrieved passage IDs, and daily job/character counters. |
+| `sessions`, `auth_attempts`, `request_limits` | Hashed session identifiers, authentication lockout counters, and request rate limits. |
+| `account_action_tokens`, `mfa_challenges`, `mfa_recovery_codes` | Hashed single-use email/password/unlock tokens, MFA challenges, and hashed one-time recovery codes. |
 
-### Users
-- `id` — user UUID
-- `email` — email address, unique at the app level
-- `password_hash` — derived password hash
-- `password_salt` — password salt
-- `created_at` — creation timestamp
+Legacy schema tables are retained as rollback data. For a controlled migration, stop the API and run `npm run db:up --workspace @cleared/api`. The migration creates a SQLite backup before conversion. To roll back, run `npm run db:down --workspace @cleared/api`; rollback creates another snapshot and restores the Phase 2 API schema while archiving Phase 3 tables.
 
-### Memberships
-- `workspace_id` — workspace reference
-- `user_id` — user reference
-- `role` — one of the workspace roles
+## Review and decision rules
 
-### Invitations
-- `id` — invitation UUID
-- `workspace_id` — target workspace
-- `email` — invited email address
-- `role` — role assigned on acceptance
-- `token_hash` — hashed invite token
-- `created_by` — inviter user id
-- `expires_at` — expiry timestamp
-- `accepted_at` — acceptance timestamp
-
-### Reviews
-- `id` — review UUID
-- `workspace_id` — owning workspace
-- `data` — full review JSON blob
-
-### Sources
-- `id` — source UUID
-- `workspace_id` — owning workspace
-- `data` — full source JSON blob
+- Each submission or text edit creates a revision with editor and content hash. A decision records the exact revision it applies to; an approved revision is locked. Later edits create a new revision.
+- Only owners, administrators, brand managers, and reviewers may record final review actions. Recent authentication is required for approval.
+- No one, including an owner or administrator, may approve or reject their own submission.
+- Approval is refused while recorded findings remain unresolved.
+- `GET /api/reviews/:id/history` returns the workspace-scoped audit events, revisions, and decisions used by the review History panel.
 
 ## Verification flow
 
-The Gemini flow is designed as a human-in-the-loop review assistant.
+Verification is a human-in-the-loop review assistant. Each request creates or reuses a background job bound to the current workspace, review, and revision.
 
 1. A creator submits a review draft.
-2. Approved sources are loaded from the workspace.
-3. The API sends the draft plus relevant source text to Gemini.
-4. Gemini must return structured JSON with claim-level results.
-5. The server evaluates the result, stores findings on the review, and updates status if needed.
-6. The review remains subject to a human approval or rejection decision.
+2. The worker selects the latest clean, unexpired source passages that the requesting user may access. It ranks passages for each draft sentence with an in-repo BM25-style score, removes duplicates, and caps the retrieved text.
+3. Deterministic checks run locally. Uncovered sentences are marked Not enough evidence without a model call. Clear numeric, percentage, currency, date, and supported named-slot conflicts are Contradicted with an exact source quote.
+4. Only when the workspace AI setting is enabled and a Gemini key is configured does the worker send covered sentences and their retrieved passages to Google. Draft/source text is wrapped in random delimiters and described as untrusted data in the system instructions. The request uses structured JSON output, low temperature, no tools, and a 30-second provider timeout.
+5. The server rejects unknown or malformed response fields, retries malformed output once, verifies evidence quotes against the exact retrieved passage, and chooses the stricter deterministic/model verdict. A model cannot upgrade a deterministic contradiction.
+6. Jobs persist as queued, running, succeeded, failed, or cancelled; the in-process worker retries transient provider failures once, uses backoff, and requeues jobs left running after a restart. Per-workspace rate, daily job, and daily Gemini character caps apply.
+7. Before saving results, the server confirms that the review still points to the same revision. Findings retain mode, model, prompt version, source version, passage, and job provenance. A human still makes the final review decision.
 
 This means AI can suggest findings, but it never acts as the final publishing authority.
 
-## Testing
+### AI verification and data privacy
 
-The project includes a focused workspace-access test suite.
+AI checking defaults off for every workspace. With it off, only deterministic checks run and no content goes to Google. When an owner or administrator enables it, draft sentences and selected source passages may be sent to Google through the Gemini API. Use a paid Gemini API tier with active billing for production data; the `GEMINI_PAID_TIER_CONFIRMED=true` environment setting is an operator attestation and does not verify billing with Google. Google's unpaid-service terms allow submitted content to be used to improve products and reviewed by people. Paid-service prompts and responses are not used to improve products, though limited abuse-monitoring and legal logging may still occur. Review the current [Gemini API terms](https://ai.google.dev/gemini-api/terms) and [billing-tier documentation](https://ai.google.dev/gemini-api/docs/billing) before enabling AI for production data. The system prompt and delimiters reduce prompt-injection risk but do not provide a comprehensive defense.
+
+## Tests and builds
+
+The API suite uses Node's built-in test runner. The default API command runs `apps/api/test/*.test.js`, covering security/auth, MFA, workspace isolation, review history, files/sources, and workspace access:
 
 ```bash
 npm test --workspace @cleared/api
 ```
 
-The test file verifies:
-- workspace creation
-- invitation acceptance
-- member-role scope isolation
-- access restrictions between workspaces
-- rejected re-use of already-used invitations
+MinIO + ClamAV integration tests are separate and require Docker Compose:
+
+```bash
+docker compose -f docker-compose.phase2-integration.yml up -d --wait
+npm run test:integration --workspace @cleared/api
+docker compose -f docker-compose.phase2-integration.yml down
+```
+
+They cover the S3-compatible adapter, clean and EICAR scans, fail-closed quarantine on scanner errors, and scanner size limits. Build the frontend with `npm run build`. See `docs/security-route-test-matrix.md` for route-by-route coverage. MFA TOTP replay and recovery-code use are separate tests in `security-phase-1a.test.js`.
 
 ## Current limitations and known gaps
 
@@ -349,22 +424,26 @@ This MVP is intentionally compact, but several things are still not implemented 
 - source uploads are limited to TXT, MD, and CSV
 - production needs configured SMTP for invitation and account emails
 - sessions are persisted in SQLite, so the setup is single-instance and has no managed session store
-- no production deployment configuration for scaling
-- the MinIO/ClamAV integration setup is available but has not been run against live containers here
+- deployment and scaling configuration for production is still a roadmap item
+- the MinIO/ClamAV integration suite requires Docker Compose and must be run against local containers before deployment
 - no managed PostgreSQL runtime is active; see [PostgreSQL portability notes](docs/postgresql-portability.md)
-- no production-ready SSO or compliance certification is claimed
+- no production-ready SSO is implemented
+- deterministic verification uses conservative number, date, currency, percentage and named-term checks; it does not replace expert review of nuanced claims
+- Gemini billing confirmation is an operator attestation and cannot verify the account's billing state; prompt delimiters and strict output checks reduce injection risk but are not a comprehensive defense
+- legacy reviews have migrated revision/submission data but do not have reconstructed historical decisions
+- solo workspaces cannot approve their own submissions because separation of duties requires a different user
+- suggested corrections are not persisted as correction records; editing the draft itself does create a revision
+- review notifications are in-app only: reviewers/managers are notified on submission and creators on decisions; email, preferences, and push delivery are not implemented
+- no scheduled backups, restore drills, or production operations setup exist; schema migration commands create one-off SQLite safety snapshots only
+- Node 24.19.x marks `node:sqlite` as Stability 1.2, Release candidate; see the [Node.js v24.19 SQLite documentation](https://nodejs.org/download/release/v24.19.0/docs/api/sqlite.html)
+- the audit hash chain detects edits and interior row deletion, but it cannot establish trust if a host administrator replaces the entire database and recomputes the chain; send logs to a separate store for stronger assurance
 
-## Future roadmap
+## Roadmap
 
-The near-term roadmap is:
-
-1. Formalize the domain model and API contracts
-2. Move identity and tenant access to Supabase/Auth managed services
-3. Add full document extraction for PDF and DOCX
-4. Expand audit trail and governance reporting
-5. Add richer review corrections, comments, and revision history
-6. Move from SQLite to persistent managed database storage for production
-7. Add scanning, export, and compliance controls
+1. **Phase 4 — Verification hardening:** bounded passage retrieval, deterministic checks, optional AI with strict output validation, and background jobs are implemented. Delimiters and system instructions reduce prompt-injection risk but are not a comprehensive defense; see the evaluation results from `npm run eval --workspace @cleared/api`.
+2. **Phase 5 — Product features:** in-app review submission and decision notifications are implemented; add delivery preferences and optional email notifications.
+3. **Production deployment:** complete deployment configuration and runbooks; validate backups/restores, secret handling, SMTP, S3-compatible storage, ClamAV, monitoring, and operational recovery in the target environment.
+4. **PostgreSQL:** use `docs/postgresql-portability.md` to plan a later managed PostgreSQL migration and workspace row-level security. SQLite remains the only active runtime until PostgreSQL is separately implemented and tested. The `supabase/` directory is an inactive schema/RLS planning scaffold.
 
 ## Security considerations
 
@@ -372,10 +451,12 @@ A few important guardrails are already in place:
 - random session IDs are stored hashed in SQLite; cookies are HMAC-signed
 - workspace membership is enforced before most protected routes
 - owners cannot be removed from a workspace by a lower-role user
-- role restrictions prevent creators from approving reviews they do not own
+- separation of duties prevents anyone, including owners and administrators, from approving or rejecting their own submission
 - AI results are treated as advisory only and do not bypass human approval
 
-Nevertheless, the current app should still be considered a development MVP. Production rollout needs the remaining identity and file controls, tested backups, deployment review, and independent security testing. No compliance certification is claimed.
+Nevertheless, the current app should still be considered a development MVP. Production rollout needs deployment review, tested backups, live-service validation, and independent security testing. No compliance or security certification is claimed.
+
+See [SECURITY.md](SECURITY.md) for the security policy and [THREAT_MODEL.md](THREAT_MODEL.md) for the current threat model. Report suspected vulnerabilities privately to the project maintainers following `SECURITY.md`; do not include credentials or real customer data. There is currently no published monitored security email or private reporting destination, so configure one before public launch.
 
 ## License
 

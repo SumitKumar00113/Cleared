@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Router } from 'express';
 import multer from 'multer';
-import { getReview, getReviews, getStoredFile, reviewHistory, saveReview } from './store.js';
+import { createReviewNotifications, getReview, getReviews, getStoredFile, listMembers, reviewHistory, saveReview } from './store.js';
 import { requireRecentAuth, requireRole } from './auth.js';
 import { readCleanFile, storeTextUpload } from './private-files.js';
 import { validateTextUpload } from './file-validation.js';
@@ -55,6 +55,7 @@ reviewsRouter.post('/', requireRole(['owner','administrator','brand_manager','cr
     }
     const review = { id, workspaceId: request.user.workspaceId, title, content: draftText, fileId: file?.record.id, fileName: file?.record.originalName, attachmentScanStatus: file?.record.scanStatus, owner: request.user.email, ownerId: request.user.userId, team: 'Unassigned', status: 'In review', date: new Date().toISOString(), findings: 0 };
     saveReview(request.user.workspaceId, review, request.user.userId, request.get('origin') || request.get('referer'));
+    createReviewNotifications(request.user.workspaceId,listMembers(request.user.workspaceId).filter((member)=>['owner','administrator','brand_manager','reviewer'].includes(member.role)&&member.userId!==request.user.userId).map((member)=>member.userId),id,'Draft submitted',`${request.user.email} submitted "${title}" for review.`);
     return response.status(201).json({ data: review });
   } catch (error) {
     return response.status(error.status || 400).json({ error: error.message || 'Could not store this review.' });
@@ -74,7 +75,9 @@ reviewsRouter.patch('/:id', (request, response, next) => request.body?.status ==
   if (request.body.status === 'Approved' && Number(review.findings || 0) > 0) return response.status(409).json({ error: 'Resolve the recorded findings before approving this review.' });
   if (['Approved','Rejected','Needs changes'].includes(request.body.status) && !['owner','administrator','brand_manager','reviewer'].includes(request.user.role)) return response.status(403).json({ error: 'A reviewer or workspace manager must record this decision.' });
   if (['Approved','Rejected'].includes(request.body.status) && review.ownerId===request.user.userId) return response.status(403).json({error:'You cannot approve or reject your own submission.'});
+  const previousStatus=review.status;
   review.status = request.body.status;
   saveReview(request.user.workspaceId, review, request.user.userId, request.get('origin') || request.get('referer'));
+  if (previousStatus!==request.body.status && ['Approved','Rejected','Needs changes'].includes(request.body.status)) createReviewNotifications(request.user.workspaceId,[review.ownerId],review.id,`Review ${request.body.status.toLowerCase()}`,`"${review.title}" was marked ${request.body.status.toLowerCase()} by ${request.user.email}.`);
   return response.json({ data: getReview(request.user.workspaceId,review.id) });
 });

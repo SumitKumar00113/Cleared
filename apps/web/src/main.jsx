@@ -1,5 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import '@fontsource/dm-sans/latin-400.css';
+import '@fontsource/dm-sans/latin-500.css';
+import '@fontsource/newsreader/latin-400.css';
+import '@fontsource/newsreader/latin-400-italic.css';
+import '@fontsource/ibm-plex-mono/latin-400.css';
+import '@fontsource/ibm-plex-mono/latin-500.css';
 import {
   Activity, ArrowDown, ArrowDownRight, ArrowRight, ArrowUpRight, Bell, BookOpen,
   Check, CheckCheck, ChevronDown, ChevronRight, CircleHelp, Clock3, FileText,
@@ -7,8 +13,12 @@ import {
   ShieldCheck, SlidersHorizontal, Sparkles, X, AlertTriangle, UploadCloud,
 } from 'lucide-react';
 import './styles.css';
+import LandingPage from './LandingPage.jsx';
 import WorkspaceSettings from './WorkspaceSettings.jsx';
 import { apiFetch, apiFetchRecent } from './api.js';
+import { CommandPalette, Rail } from './design-system.jsx';
+import './design-system.css';
+import './overview.css';
 
 const ReviewDesk = React.lazy(() => import('./ReviewDesk.jsx'));
 
@@ -31,9 +41,15 @@ function WorkspaceApp({ user }) {
   const [toast, setToast] = useState('');
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [verificationState,setVerificationState]=useState('idle');
+  const [aiCheckEnabled,setAiCheckEnabled]=useState(false);
   const [mobileNav, setMobileNav] = useState(false);
+  const [railExpanded, setRailExpanded] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [auditEvents, setAuditEvents] = useState([]);
+  const canViewAudit = ['owner', 'administrator'].includes(user.role);
 
-  useEffect(() => { document.title = 'Cleared Ã¢â‚¬â€ Review workspace'; }, []);
+  useEffect(() => { document.title = 'Cleared ? Review workspace'; }, []);
 
   useEffect(() => {
     Promise.all([
@@ -47,6 +63,25 @@ function WorkspaceApp({ user }) {
       setSources([]);
       notify('Workspace records could not be loaded. Check the API connection.');
     });
+  }, []);
+
+  useEffect(()=>{fetch('/api/workspace').then((response)=>response.ok?response.json():null).then((result)=>{if(result?.data)setAiCheckEnabled(Boolean(result.data.aiCheckEnabled));}).catch(()=>{});},[]);
+
+  useEffect(() => {
+    if (!canViewAudit) return undefined;
+    let active = true;
+    fetch('/api/workspace/audit?limit=8').then(async (response) => {
+      if (!response.ok) throw new Error('Activity unavailable');
+      const body = await response.json();
+      if (active) setAuditEvents(body.data || []);
+    }).catch(() => { if (active) setAuditEvents([]); });
+    return () => { active = false; };
+  }, [canViewAudit]);
+
+  useEffect(() => {
+    const handleKey = (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setCommandOpen((open) => !open); } };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
   }, []);
 
   useEffect(() => {
@@ -103,14 +138,32 @@ function WorkspaceApp({ user }) {
 
   async function checkReview(review) {
     setChecking(true);
+    setVerificationState('queued');
     try {
       const response = await apiFetch('/api/verification/check/' + review.id, { method: 'POST' });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Claim check failed.');
-      setReviews((items) => items.map((item) => item.id === review.id ? result.data.review : item));
-      setSelected(result.data.review);
-      notify('Checked with ' + result.data.provider + ' (' + result.data.model + '). A human reviewer still decides.');
-    } catch (error) { notify(error.message || 'Could not check this draft.'); }
+      let job=result.data.job;
+      if(!job?.id)throw new Error('Verification did not return a job id.');
+      const started=Date.now();
+      while(Date.now()-started<120000) {
+        setVerificationState(job.status==='running'?'checking':'queued');
+        await new Promise((resolve)=>setTimeout(resolve,700));
+        const poll=await fetch(`/api/verification/jobs/${encodeURIComponent(job.id)}`);
+        const body=await poll.json();if(!poll.ok)throw new Error(body.error||'Could not read verification status.');
+        job=body.data.job;
+        if(job.status==='succeeded') {
+          const updated=body.data.review;
+          setReviews((items)=>items.map((item)=>item.id===review.id?updated:item));setSelected(updated);
+          const limited=Boolean(body.data.limited);
+          setVerificationState(limited?'limited':'done');
+          notify(limited?'Limited deterministic check complete. A human reviewer still decides.':'AI assisted check complete. A human reviewer still decides.');
+          return;
+        }
+        if(job.status==='failed'||job.status==='cancelled')throw new Error(job.errorCode==='daily_character_cap'||job.errorCode==='daily_job_cap'?'Verification is temporarily unavailable. Try again later.':'Verification failed. Try again later.');
+      }
+      throw new Error('Verification is still running. Check the review again shortly.');
+    } catch (error) { setVerificationState('failed');notify(error.message || 'Could not check this draft.'); }
     finally { setChecking(false); }
   }
 
@@ -148,8 +201,9 @@ function WorkspaceApp({ user }) {
 
   const changeView = (name) => { if (name === 'Reviews') { window.location.assign('/workspace'); return; } setView(name); setMobileNav(false); setSearch(''); };
 
-  return <div className="app-shell">
+  return <div className="app-shell redesign-shell">
     <a className="skip-link" href="#main">Skip to workspace</a>
+    <Rail view={view} onChange={changeView} user={user} onSignOut={async () => { await apiFetch('/api/auth/logout', { method: 'POST' }); window.location.reload(); }} expanded={railExpanded} onToggle={() => setRailExpanded((value) => !value)} onCommand={() => setCommandOpen(true)} />
     <aside className={`sidebar ${mobileNav ? 'sidebar-open' : ''}`} aria-label="Main navigation">
       <a className="brand" href="/"><span className="brand-mark"><Check size={19} strokeWidth={2.8} /></span><span>cleared<span className="brand-period">.</span></span></a>
       <div className="workspace-switcher"><span className="workspace-avatar">{user.email.slice(0,1).toUpperCase()}</span><span className="workspace-copy"><strong>{user.email}</strong><small>{user.role}</small></span><ChevronDown size={15} /></div>
@@ -167,26 +221,29 @@ function WorkspaceApp({ user }) {
 
     <main id="main" className="main-content">
       <header className="topbar"><div className="breadcrumb"><span>{user.email}</span><ChevronRight size={14} /><strong>{view}</strong></div><div className="top-actions"><button className="top-link" onClick={() => notify('YouÃ¢â‚¬â„¢re all caught up.')}><Bell size={17} /><span>Notifications</span><i /></button><span className="top-divider" /><button className="icon-button top-help" aria-label="Help" onClick={() => notify('Help centre is ready.')}><CircleHelp size={18} /></button><button className="mobile-menu" aria-label={mobileNav ? 'Close menu' : 'Open menu'} aria-expanded={mobileNav} onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <X /> : <Menu />}</button></div></header>
-      {view === 'Overview' ? <Overview reviews={visibleReviews} search={search} setSearch={setSearch} filter={filter} setFilter={setFilter} filterOpen={filterOpen} setFilterOpen={setFilterOpen} onOpen={setSelected} onView={changeView} onNew={() => setModal('review')} user={user} sources={sources} onSource={() => setModal('source')} onDownload={downloadFile} /> : view === 'Reviews' ? <ReviewsPage reviews={visibleReviews} search={search} setSearch={setSearch} filter={filter} setFilter={setFilter} filterOpen={filterOpen} setFilterOpen={setFilterOpen} onOpen={setSelected} onNew={() => setModal('review')} /> : view === 'Approved sources' ? <SourcesPage sources={sources} onAdd={() => setModal('source')} onDownload={downloadFile} /> : view === 'Insights' ? <InsightsPage reviews={reviews} /> : <WorkspaceSettings user={user} />}
+      {view === 'Overview' ? <Overview reviews={visibleReviews} search={search} setSearch={setSearch} filter={filter} setFilter={setFilter} filterOpen={filterOpen} setFilterOpen={setFilterOpen} onOpen={setSelected} onView={changeView} onNew={() => setModal('review')} user={user} sources={sources} onSource={() => setModal('source')} onDownload={downloadFile} auditEvents={auditEvents} canViewAudit={canViewAudit} /> : view === 'Reviews' ? <ReviewsPage reviews={visibleReviews} search={search} setSearch={setSearch} filter={filter} setFilter={setFilter} filterOpen={filterOpen} setFilterOpen={setFilterOpen} onOpen={setSelected} onNew={() => setModal('review')} /> : view === 'Approved sources' ? <SourcesPage sources={sources} onAdd={() => setModal('source')} onDownload={downloadFile} /> : view === 'Insights' ? <InsightsPage reviews={reviews} /> : <WorkspaceSettings user={user} onAISettingChanged={setAiCheckEnabled} />}
     </main>
 
-    {selected && <ReviewDrawer review={selected} onClose={() => setSelected(null)} onDecision={updateStatus} onCheck={checkReview} checking={checking} onDownload={downloadFile} />}
+    {selected && <ReviewDrawer review={selected} onClose={() => setSelected(null)} onDecision={updateStatus} onCheck={checkReview} checking={checking} verificationState={verificationState} aiCheckEnabled={aiCheckEnabled} onDownload={downloadFile} />}
     {modal === 'review' && <Dialog title="Submit content" kicker="START A REVIEW" intro="Check a draft against your teamÃ¢â‚¬â„¢s approved sources before it goes live." onClose={() => setModal('')} onSubmit={submitReview} submitLabel="Check draft" busy={busy}><label className="form-label">Review title<input name="title" required placeholder="e.g. Spring campaign announcement" /></label><label className="form-label">Content to review<textarea name="content" placeholder="Paste the draft or the section you want checkedÃ¢â‚¬Â¦" /></label><FileDrop name="file" accept=".txt,.md,.csv" /><span className="form-hint">Text is required for Gemini claim checks.</span></Dialog>}
     {modal === 'source' && <Dialog title="Add an approved source" kicker="APPROVED KNOWLEDGE" intro="Give your team a trusted reference for fact checks and brand guidance." onClose={() => setModal('')} onSubmit={submitSource} submitLabel="Add source" busy={busy}><label className="form-label">Source name<input name="name" required placeholder="e.g. Product facts Ã¢â‚¬â€ 2026" /></label><label className="form-label">Collection<select name="category"><option>Brand guidelines</option><option>Product facts</option><option>Policies</option><option>FAQs</option></select></label><label className="form-label">Optional expiry date<input name="expiresAt" type="date" /></label><FileDrop name="file" accept=".txt,.md,.csv" required /></Dialog>}
     {toast && <div className="toast" role="status" aria-live="polite"><span className="toast-check"><Check size={14} /></span>{toast}</div>}
+    <CommandPalette open={commandOpen} onClose={() => setCommandOpen(false)} onChoose={(name) => { changeView(name); setCommandOpen(false); }} onNewReview={() => { setCommandOpen(false); setModal('review'); }} />
   </div>;
 }
 
-function Overview({ reviews, search, setSearch, filter, setFilter, filterOpen, setFilterOpen, onOpen, onView, onNew, user, sources, onSource, onDownload }) {
+function Overview({ reviews, search, setSearch, filter, setFilter, filterOpen, setFilterOpen, onOpen, onView, onNew, user, sources, onSource, onDownload, auditEvents, canViewAudit }) {
   const waiting = reviews.filter((item) => item.status === 'In review').length;
   const needsChanges = reviews.filter((item) => item.status === 'Needs changes').length;
   const approved = reviews.filter((item) => item.status === 'Approved').length;
-  return <div className="page-wrap" data-enter>
-    <section className="welcome-row"><div><div className="eyebrow"><span className="eyebrow-dot" /> YOUR WORKSPACE</div><h1>Welcome, {user.email}<span className="heading-period">.</span></h1><p className="welcome-subtitle">{waiting} reviews are with reviewers and {needsChanges} need changes. Open a review to see its draft and findings.</p></div><button className="button button-primary" onClick={onNew}><Plus size={17} />New review</button></section>
-    <section className="stats-grid" aria-label="Current workspace records"><Stat title="With reviewers" number={String(waiting).padStart(2, '0')} foot="Current queue" icon={<Clock3 />} tone="sand" /><Stat title="Approved" number={String(approved).padStart(2, '0')} foot="Current queue" icon={<CheckCheck />} tone="green" /><Stat title="Needs changes" number={String(needsChanges).padStart(2, '0')} foot="Current queue" icon={<AlertTriangle />} tone="rose" /><Stat title="Approved sources" number={String(sources.length).padStart(2, '0')} foot="Available records" icon={<BookOpen />} tone="dark" /></section>
-    <section className="content-grid"><div className="reviews-panel panel"><div className="panel-heading"><div><div className="section-kicker">YOUR QUEUE <span className="queue-total">{reviews.length}</span></div><h2>Recent reviews</h2></div><button className="text-button" onClick={() => onView('Reviews')}>View all <ArrowRight size={15} /></button></div><ReviewTools search={search} setSearch={setSearch} filter={filter} setFilter={setFilter} filterOpen={filterOpen} setFilterOpen={setFilterOpen} /><ReviewList reviews={reviews.slice(0, 5)} onOpen={onOpen} compact /><PanelFooter count={reviews.length} onView={() => onView('Reviews')} /></div>
-      <aside className="right-column"><section className="guidance-card panel"><div className="guidance-head"><div><span className="section-kicker">QUICK ACCESS</span><h2>Brand guidance</h2></div><span className="book-icon"><BookOpen size={21} /></span></div><p>Keep the team aligned with the latest approved facts and language.</p><button className="guidance-link" onClick={() => onView('Approved sources')}>Browse approved sources <ArrowRight size={15} /></button><div className="guidance-rule" /><div className="source-list">{sources.slice(0, 3).map((source) => <SourceRow key={source.id} source={source} onDownload={onDownload} />)}</div><button className="upload-source" onClick={onSource}><Plus size={16} /> Add approved source</button></section><ActivityCard /></aside>
-    </section><PageFooter />
+  const sourceHealth = sources.reduce((count, source) => { const state = source.expired ? 'expired' : source.expiringSoon ? 'soon' : source.scanStatus === 'clean' ? 'clean' : 'quarantine'; count[state] += 1; return count; }, { expired: 0, soon: 0, clean: 0, quarantine: 0 });
+  const titleName = user.displayName || user.name || (user.email || 'there').split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return <div className="page-wrap overview-v2" data-enter>
+    <section className="overview-heading"><div><div className="eyebrow"><span className="eyebrow-dot" /> WORKSPACE OVERVIEW</div><h1>Good to see you, <em>{titleName}</em><span className="heading-period">.</span></h1><p className="welcome-subtitle">A clear view of drafts, decisions, and trusted sources.</p></div><button className="button button-primary" onClick={onNew}><Plus size={17} />New review</button></section>
+    <section className="pipeline-band" aria-label="Review pipeline"><div className="pipeline-lead"><span className="section-kicker">LIVE QUEUE</span><strong>{String(waiting).padStart(2, '0')}</strong><span>with reviewers</span></div><div className="pipeline-step"><span className="pipeline-dot pipeline-dot-review" /><span><strong>{waiting}</strong> in review</span></div><div className="pipeline-connector" /><div className="pipeline-step"><span className="pipeline-dot pipeline-dot-change" /><span><strong>{needsChanges}</strong> need changes</span></div><div className="pipeline-connector" /><div className="pipeline-step"><span className="pipeline-dot pipeline-dot-approved" /><span><strong>{approved}</strong> approved</span></div><div className="pipeline-source"><span className="mono-label">SOURCES</span><strong>{sources.length}</strong><span>available</span></div></section>
+    <section className="overview-grid"><div className="queue-section"><div className="section-heading"><div><span className="section-kicker">YOUR WORKSPACE</span><h2>Recent reviews</h2></div><button className="text-button" onClick={() => onView('Reviews')}>All reviews <ArrowRight size={15} /></button></div><PanelFooter count={reviews.length} onView={() => onView('Reviews')} /><ReviewTools search={search} setSearch={setSearch} filter={filter} setFilter={setFilter} filterOpen={filterOpen} setFilterOpen={setFilterOpen} /><ReviewList reviews={reviews.slice(0, 5)} onOpen={onOpen} compact /><button className="queue-create" onClick={onNew}><Plus size={16} /> Submit a draft</button></div>
+      <aside className="overview-aside"><ActivityCard events={auditEvents} canViewAudit={canViewAudit} /><section className="source-health"><div className="section-heading aside-heading"><div><span className="section-kicker">SOURCE HEALTH</span><h2>Trusted references</h2></div><button className="icon-button" aria-label="Open approved sources" onClick={() => onView('Approved sources')}><ArrowUpRight size={17} /></button></div><div className="source-health-counts"><div><strong>{sourceHealth.clean}</strong><span>Clean</span></div><div className={sourceHealth.soon ? 'health-warn' : ''}><strong>{sourceHealth.soon}</strong><span>Expiring soon</span></div><div className={sourceHealth.expired || sourceHealth.quarantine ? 'health-alert' : ''}><strong>{sourceHealth.expired + sourceHealth.quarantine}</strong><span>Expired or quarantined</span></div></div><div className="source-health-list">{sources.slice(0, 3).map((source) => <SourceRow key={source.id} source={source} onDownload={onDownload} />)}{sources.length === 0 && <p className="quiet-note">No sources yet. Add approved text for future claim checks.</p>}</div><button className="source-add" onClick={onSource}><Plus size={15} />Add a source</button></section></aside>
+    </section>
   </div>;
 }
 
@@ -201,10 +258,31 @@ function ReviewList({ reviews, onOpen, compact = false }) {
 }
 
 function Status({ status }) { const tone = status === 'Approved' ? 'approved' : status === 'Needs changes' ? 'changes' : status === 'Rejected' ? 'rejected' : 'review'; return <span className={`status-pill status-${tone}`}><i />{status}</span>; }
-function PanelFooter({ count, onView }) { return <div className="panel-footer"><span>Showing <strong>{count}</strong> of 5 reviews</span><button className="footer-link" onClick={onView}>Open review queue <ArrowRight size={14} /></button></div>; }
-function SourceRow({ source, onDownload }) { const freshStatus = source.expired ? 'Expired' : source.expiringSoon ? 'Expiring soon' : source.scanStatus === 'clean' ? 'Scanned clean' : 'Quarantined'; return <div className="source-item"><span className="source-file source-file-doc">{source.type}</span><span><strong>{source.name}</strong><small>v{source.version || 1} · {source.updated}{source.expiresAt ? ` · expires ${new Date(source.expiresAt).toLocaleDateString()}` : ''} · {freshStatus}</small></span>{source.fileId && source.scanStatus === 'clean' && onDownload ? <button className="more-button" onClick={() => onDownload(source.fileId)} aria-label={`Download ${source.name}`}>Download</button> : <span className="more-button" aria-label={freshStatus}>{source.scanStatus === 'clean' ? '—' : 'Quarantined'}</span>}</div>; }
+function PanelFooter({ count, onView }) { return <div className="panel-footer"><span><strong>{count}</strong> {count === 1 ? 'review' : 'reviews'} in this workspace</span><button className="footer-link" onClick={onView}>Open review queue <ArrowRight size={14} /></button></div>; }
+function SourceRow({ source, onDownload }) {
+  const freshStatus = source.expired ? 'Expired' : source.expiringSoon ? 'Expiring soon' : source.scanStatus === 'clean' ? 'Scanned clean' : 'Quarantined';
+  const uploaded = source.updated ? new Date(source.updated).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Recently added';
+  return <div className="source-item"><span className="source-file source-file-doc">{source.type || 'TXT'}</span><span><strong>{source.name}</strong><small>v{source.version || 1} {'\u00b7'} {uploaded} {'\u00b7'} {freshStatus}</small></span>{source.fileId && source.scanStatus === 'clean' && onDownload ? <button className="more-button" onClick={() => onDownload(source.fileId)} aria-label={'Download ' + source.name}>Download</button> : <span className="more-button" aria-label={freshStatus}>{source.scanStatus === 'clean' ? '?' : 'Quarantined'}</span>}</div>;
+}
+function ActivityCard({ events, canViewAudit }) {
+  const describe = (event) => {
+    const labels = { 'review.submitted': 'submitted a review', 'review.approved': 'approved a review', 'review.rejected': 'rejected a review', 'review.needs_changes': 'requested changes', 'review.status_changed': 'changed review status', 'auth.sign_in': 'signed in', 'auth.sign_in_failed': 'had a failed sign in', 'mfa.enabled': 'enabled MFA', 'mfa.enrollment_started': 'started MFA setup', 'source.upload': 'added a source', 'source.new_version': 'uploaded a source version', 'source.deleted': 'deleted a source', 'file.download': 'downloaded a file', 'file.scan_result': 'recorded a scan result', 'invitation.accepted': 'accepted an invitation', 'member.role_changed': 'changed a member role' };
+    return labels[event.action] || event.action.replace(/[._]/g, ' ');
+  };
+  return <section className="activity-section"><div className="section-heading aside-heading"><div><span className="section-kicker">RECENT ACTIVITY</span><h2>Workspace timeline</h2></div><Activity size={17} /></div>{!canViewAudit ? <p className="quiet-note">Audit activity is available to workspace owners and administrators.</p> : events.length ? <ol className="activity-timeline">{events.slice(0, 5).map((event) => <li key={event.id}><span className="timeline-marker" /><div><strong>{event.actorEmail || 'System'}</strong><span>{describe(event)}</span><small>{event.targetType === 'review' ? 'Review' : event.targetType === 'source' ? 'Source' : event.targetType}</small></div><time>{formatRelativeTime(event.occurredAt)}</time></li>)}</ol> : <p className="quiet-note">New workspace activity will appear here.</p>}</section>;
+}
 
-function ActivityCard() { return <section className="activity-card panel"><div className="activity-header"><div><span className="section-kicker">ACTIVITY</span><h2>Activity history</h2></div></div><p className="insight-empty">Activity history will appear when audit events are connected.</p></section>; }
+function formatRelativeTime(value) {
+  if (!value) return 'Just now';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const minutes = Math.round((date.getTime() - Date.now()) / 60000);
+  if (Math.abs(minutes) < 1) return 'Just now';
+  if (Math.abs(minutes) < 60) return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(minutes, 'minute');
+  const hours = Math.round(minutes / 60);
+  if (Math.abs(hours) < 24) return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(hours, 'hour');
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
+}
 
 function ReviewsPage({ reviews, search, setSearch, filter, setFilter, filterOpen, setFilterOpen, onOpen, onNew }) { return <div className="page-wrap page-secondary" data-enter><div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-dot" /> REVIEW WORKSPACE</div><h1>Review queue<span className="heading-period">.</span></h1><p className="welcome-subtitle">Keep every draft moving toward a confident approval.</p></div><button className="button button-primary" onClick={onNew}><Plus size={17} />New review</button></div><div className="panel full-panel"><div className="panel-heading"><div><div className="section-kicker">ALL SUBMISSIONS <span className="queue-total">{reviews.length}</span></div><h2>Content reviews</h2></div></div><ReviewTools search={search} setSearch={setSearch} filter={filter} setFilter={setFilter} filterOpen={filterOpen} setFilterOpen={setFilterOpen} /><ReviewList reviews={reviews} onOpen={onOpen} /><PanelFooter count={reviews.length} onView={() => { setSearch(''); setFilter('All statuses'); }} /></div></div>; }
 
@@ -213,12 +291,12 @@ function SourcesPage({ sources, onAdd, onDownload }) { return <div className="pa
 function InsightsPage({ reviews }) {
   const totals = ['In review', 'Needs changes', 'Approved', 'Rejected'].map((status) => [status, reviews.filter((r) => r.status === status).length]);
   const total = reviews.length;
-  return <div className="page-wrap page-secondary" data-enter><div className="page-heading"><div><h1>Insights<span className="heading-period">.</span></h1><p className="welcome-subtitle">A snapshot of the records in this workspace.</p></div><span className="data-honesty">Current queue: {total} records</span></div><div className="insight-layout"><section className="insight-chart panel"><div className="panel-heading"><div><h2>Reviews by status</h2><p>Current records only; date history is not available.</p></div></div><div className="status-breakdown">{totals.map(([label, value]) => <div className="breakdown-row" key={label}><span>{label}</span><div><i className={'breakdown-' + label.toLowerCase().replaceAll(' ', '-')} style={{ width: (total ? value / total * 100 : 0) + '%' }} /></div><b>{value}</b></div>)}</div></section><section className="insight-chart panel"><div className="panel-heading"><div><h2>Findings by review</h2><p>Counts recorded on current review records.</p></div></div><div className="finding-bars">{reviews.slice(0, 7).map((review) => <div className="finding-bar-row" key={review.id} title={review.title}><span>{review.title}</span><div><i style={{ height: Math.max(4, (review.findings || 0) * 24) + 'px' }} /></div><b>{review.findings || 0}</b></div>)}</div></section></div><p className="insight-limitation">Trends, first-pass rates, decision times, and claim topics need event data that this workspace does not provide.</p></div>;
+  return <div className="page-wrap page-secondary" data-enter><div className="page-heading"><div><h1>Insights<span className="heading-period">.</span></h1><p className="welcome-subtitle">A snapshot of the records in this workspace.</p></div><span className="data-honesty">Current queue: {total} records</span></div><div className="insight-layout"><section className="insight-chart panel"><div className="panel-heading"><div><h2>Reviews by status</h2><p>Current records only; date history is not available.</p></div></div><div className="status-breakdown">{totals.map(([label, value]) => <div className="breakdown-row" key={label}><span>{label}</span><div><i className={'breakdown-' + label.toLowerCase().replaceAll(' ', '-')} style={{ width: (total ? value / total * 100 : 0) + '%' }} /></div><b>{value}</b></div>)}</div></section><section className="insight-chart panel"><div className="panel-heading"><div><h2>Findings by review</h2><p>Counts recorded on current review records.</p></div></div><div className="finding-bars">{reviews.slice(0, 7).map((review) => <div className="finding-bar-row" key={review.id} title={review.title}><span>{review.title}</span><div><i style={{ height: Math.max(4, (review.findings || 0) * 24) + 'px' }} /></div><b>{review.findings || 0}</b></div>)}</div></section></div><p className="insight-limitation">Trend summaries, decision times, and claim topics are not currently shown.</p></div>;
 }
 
 function SettingsPage({ notify }) { return <div className="page-wrap page-secondary" data-enter><div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-dot" /> WORKSPACE</div><h1>Settings<span className="heading-period">.</span></h1><p className="welcome-subtitle">Manage your workspace preferences and review roles.</p></div></div><div className="settings-list panel"><div className="settings-item"><span className="settings-icon"><ShieldCheck size={19} /></span><div><strong>Review workflow</strong><small>Reviewer approval is required before content is marked ready.</small></div><span className="settings-value">Human approval</span></div><div className="settings-item"><span className="settings-icon"><BookOpen size={19} /></span><div><strong>Source freshness</strong><small>Review sources approaching their expiry date.</small></div><span className="settings-value">Not configured</span></div><div className="settings-item"><span className="settings-icon"><SlidersHorizontal size={19} /></span><div><strong>Roles &amp; access</strong><small>Creators, reviewers, brand managers, and administrators.</small></div><span className="settings-value">Read only</span></div></div></div>; }
 
-function ReviewDrawer({ review, onClose, onDecision, onCheck, checking }) { return <><button className="drawer-backdrop" aria-label="Close review details" onClick={onClose} /><aside className="review-drawer" aria-label="Review details"><div className="drawer-top"><span className="section-kicker">SUBMISSION DETAILS</span><button className="icon-button" onClick={onClose} aria-label="Close review details"><X size={19} /></button></div><div className="drawer-body"><span className="file-type drawer-file">D</span><h2>{review.title}</h2><p className="drawer-owner">Submitted by {review.owner} · {review.team}</p><Status status={review.status} /><div className="drawer-separator" /><span className="section-kicker">DRAFT CONTENT</span><blockquote>{review.content}</blockquote><ReviewHistory reviewId={review.id}/><p className="verification-note">Checking sends this draft and approved source text to Google Gemini. Google may use free-tier inputs to improve its products.</p><button className="button button-secondary" disabled={checking || !review.content || review.content.startsWith('Document attached:')} onClick={() => onCheck(review)}>{checking ? 'Checking with Gemini…' : 'Check claims with Gemini'}</button>{review.claimResults?.length ? <section className="claim-results"><h3>Claim findings</h3>{review.claimResults.map((item,index)=><article className={'claim-result claim-result-' + item.verdict.toLowerCase().replaceAll(' ','-')} key={index}><strong>{item.verdict}</strong><p>{item.claim}</p><small>{item.explanation}</small>{item.evidence && <blockquote>{item.evidence}<br /><b>{item.sourceName} · version {item.sourceVersion}</b></blockquote>}</article>)}<p className="human-decision-note">Automated findings assist review. A person must record the approval decision.</p></section> : <p className="verification-note">No claim check has been recorded for this draft. Add readable approved source text to run one.</p>}</div><div className="drawer-actions"><button className="button button-secondary" onClick={() => onDecision('Needs changes')}>Request changes</button><button className="button button-primary" disabled={Number(review.findings || 0)>0} title={Number(review.findings || 0)>0?'Resolve recorded findings first':undefined} onClick={() => onDecision('Approved')}><Check size={16} />Approve draft</button></div></aside></>; }
+function ReviewDrawer({ review, onClose, onDecision, onCheck, checking, verificationState, aiCheckEnabled }) { return <><button className="drawer-backdrop" aria-label="Close review details" onClick={onClose} /><aside className="review-drawer" aria-label="Review details"><div className="drawer-top"><span className="section-kicker">SUBMISSION DETAILS</span><button className="icon-button" onClick={onClose} aria-label="Close review details"><X size={19} /></button></div><div className="drawer-body"><span className="file-type drawer-file">D</span><h2>{review.title}</h2><p className="drawer-owner">Submitted by {review.owner} · {review.team}</p><Status status={review.status} /><div className="drawer-separator" /><span className="section-kicker">DRAFT CONTENT</span><blockquote>{review.content}</blockquote><ReviewHistory reviewId={review.id}/><p className="verification-note">{aiCheckEnabled?'AI checking is enabled. Draft sentences and retrieved source passages are sent to Google Gemini. Use a paid Gemini API tier with active billing for production data.':'AI checking is off. Limited deterministic checks run locally; no text is sent to Gemini.'}</p><button className="button button-secondary" disabled={checking || !review.content || review.content.startsWith('Document attached:')} onClick={() => onCheck(review)}>{checking ? 'Checking…' : 'Check claims'}</button>{verificationState!=='idle'&&<p className="verification-job-state" role="status">{({queued:'Queued',checking:'Checking',done:'Check complete',limited:'Limited check complete',failed:'Check failed'})[verificationState]||''}</p>}{review.claimResults?.length ? <section className="claim-results"><h3>Claim findings</h3>{review.claimResults.map((item,index)=><article className={'claim-result claim-result-' + item.verdict.toLowerCase().replaceAll(' ','-')} key={index}><strong>{item.verdict}</strong><p>{item.claim}</p><small>{item.explanation}</small>{item.evidence && <blockquote>{item.evidence}<br /><b>{item.sourceName} · version {item.sourceVersion}</b></blockquote>}<small className="finding-provenance">{item.mode||'unknown'} · {item.modelName||'local rules'} · {item.promptVersion||'legacy'}{item.sourceId?` · source ${item.sourceId} v${item.sourceVersion}`:''}{item.passageId?` · passage ${item.passageId}`:''}{item.jobId?` · job ${item.jobId}`:''}</small></article>)}<p className="human-decision-note">Automated findings assist review. A person must record the approval decision.</p></section> : <p className="verification-note">No claim check has been recorded for this draft. Add readable approved source text to run one.</p>}</div><div className="drawer-actions"><button className="button button-secondary" onClick={() => onDecision('Needs changes')}>Request changes</button><button className="button button-primary" disabled={Number(review.findings || 0)>0} title={Number(review.findings || 0)>0?'Resolve recorded findings first':undefined} onClick={() => onDecision('Approved')}><Check size={16} />Approve draft</button></div></aside></>; }
 
 function ReviewHistory({reviewId}) {
   const [result,setResult]=useState(null); const [error,setError]=useState('');
@@ -237,7 +315,7 @@ function App() { return <AuthGate />; }
 function AuthGate() {
   const [state, setState] = useState('loading'); const [user, setUser] = useState(null); const [configError, setConfigError] = useState('');
   useEffect(() => { fetch('/api/auth/session').then(async (response) => { const data = await response.json(); if (response.status === 503) throw new Error(data.error); if (!response.ok) throw new Error('Authentication service unavailable.'); return data; }).then((data) => { setUser(data.user); setState(data.authenticated ? 'signed-in' : 'signed-out'); }).catch((error) => { setConfigError(error.message); setState('setup'); }); }, []);
-  const onLogin = (nextUser) => { setUser(nextUser); setState('signed-in'); };
+  const onLogin = (nextUser) => { window.history.replaceState(null, '', '/'); setUser(nextUser); setState('signed-in'); };
   if (state === 'loading') return <div className="auth-screen"><p>Checking sign-in…</p></div>;
   if (window.location.pathname === '/join') return <JoinPage onLogin={onLogin} />;
   if (window.location.pathname === '/verify-email') return <AccountActionPage kind="verify" />;
@@ -246,7 +324,7 @@ function AuthGate() {
   if (window.location.pathname === '/unlock-account') return <AccountActionPage kind="unlock" />;
   if (window.location.pathname === '/resend-verification') return <AccountActionPage kind="resend" />;
   if (state === 'setup') return <LoginPage configError={configError} />;
-  if (state !== 'signed-in') return <LoginPage onLogin={onLogin} />;
+  if (state !== 'signed-in') return window.location.pathname === '/login' ? <LoginPage onLogin={onLogin} /> : <LandingPage />;
   if (user && !user.emailVerified) return <VerificationPendingPage user={user} onVerified={(next)=>setUser(next)} />;
   if (user?.mfaSetupRequired) return <MfaEnrollmentPage onComplete={setUser} />;
   const route = window.location.pathname.replace(/\/$/, '') || '/';
@@ -256,12 +334,12 @@ function AuthGate() {
 }
 
 function LoginPage({ onLogin, configError }) {
-  const [creating, setCreating] = useState(false); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+  const [creating, setCreating] = useState(() => new URLSearchParams(window.location.search).get('mode') === 'create'); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const [challenge,setChallenge]=useState(null);
   async function submit(event) { event.preventDefault(); setBusy(true); setError(''); const form = new FormData(event.currentTarget); const endpoint = creating ? '/api/auth/workspaces' : '/api/auth/login'; const payload = creating ? { workspaceName: form.get('workspaceName'), email: form.get('email'), password: form.get('password') } : { email: form.get('email'), workspaceId: form.get('workspaceId'), password: form.get('password') }; try { const response = await apiFetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not continue.'); if (data.verificationRequired) { setError('Verify your email before signing in.'); return; } if (data.mfaRequired) { setChallenge(data); return; } onLogin(data.user); } catch (cause) { setError(cause.message || 'Could not continue.'); } finally { setBusy(false); } }
   async function submitMfa(event){event.preventDefault();setBusy(true);setError('');const f=new FormData(event.currentTarget);const csrfResponse=await fetch('/api/auth/csrf');const csrf=await csrfResponse.json();const r=await fetch('/api/auth/mfa/challenge',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf.token},body:JSON.stringify({email:challenge.email,challengeToken:challenge.challengeToken,code:f.get('code'),recoveryCode:f.get('recoveryCode')})});const d=await r.json();setBusy(false);if(!r.ok){setError(d.error||'Could not verify this code.');return;}onLogin(d.user);}
   if(challenge)return <main className="auth-screen"><section className="auth-card"><a className="auth-brand" href="/">Cleared<span>.</span></a><h1>Verify your identity</h1><p>Enter a current authenticator code or a one-time recovery code.</p><form onSubmit={submitMfa}><label>Authenticator code<input name="code" inputMode="numeric" autoComplete="one-time-code"/></label><label>Recovery code<input name="recoveryCode" autoComplete="off"/></label>{error&&<p className="auth-error" role="alert">{error}</p>}<button className="button button-primary" disabled={busy}>Verify and sign in</button></form><button className="auth-switch" onClick={()=>setChallenge(null)}>Back to sign in</button></section></main>;
-  return <main className="auth-screen"><section className="auth-card"><a className="auth-brand" href="/">Cleared<span>.</span></a><h1>{creating ? 'Create a company workspace' : 'Sign in to your workspace'}</h1><p>{creating ? 'Your company gets a workspace ID. You become its first owner and can invite employees.' : 'Use your company workspace ID and your personal employee account.'}</p>{configError && <div className="auth-error" role="alert">{configError}</div>}{!configError && <form onSubmit={submit}>{creating && <label>Company or workspace name<input name="workspaceName" autoComplete="organization" required minLength="2"/></label>}<label>Email address<input name="email" type="email" autoComplete="email" required/></label>{!creating && <label>Company workspace ID<input name="workspaceId" autoComplete="off" required/></label>}<label>Password<input name="password" type="password" autoComplete={creating ? 'new-password' : 'current-password'} required minLength={creating ? 12 : undefined}/></label>{error && <p className="auth-error" role="alert">{error}</p>}<button className="button button-primary" disabled={busy}>{busy ? 'Please wait…' : creating ? 'Create workspace' : 'Sign in'}</button></form>}{!configError && <button className="auth-switch" type="button" onClick={() => { setCreating(!creating); setError(''); }}>{creating ? 'Already have an account? Sign in' : 'Create a company workspace'}</button>}</section></main>;
+  return <main className="auth-screen"><section className="auth-card"><a className="auth-brand" href="/">Cleared<span>.</span></a><h1>{creating ? 'Create a company workspace' : 'Sign in to your workspace'}</h1><p>{creating ? 'Your company gets a workspace ID. You become its first owner and can invite employees.' : 'Use your company workspace ID and your personal employee account.'}</p>{configError && <div className="auth-error" role="alert">{configError}</div>}{!configError && <form onSubmit={submit}>{creating && <label>Company or workspace name<input name="workspaceName" autoComplete="organization" required minLength="2"/></label>}<label>Email address<input name="email" type="email" autoComplete="email" required/></label>{!creating && <label>Company workspace ID<input name="workspaceId" autoComplete="off" required/></label>}<label>Password<input name="password" type="password" autoComplete={creating ? 'new-password' : 'current-password'} required minLength={creating ? 12 : undefined}/></label>{error && <p className="auth-error" role="alert">{error}</p>}<button className="button button-primary" disabled={busy}>{busy ? 'Please wait…' : creating ? 'Create workspace' : 'Sign in'}</button></form>}{!configError && !creating && <a className="auth-switch" href="/forgot-password">Forgot your password or need to set one?</a>}{!configError && <button className="auth-switch" type="button" onClick={() => { setCreating(!creating); setError(''); }}>{creating ? 'Already have an account? Sign in' : 'Create a company workspace'}</button>}</section></main>;
 }
 
 function JoinPage({ onLogin }) {

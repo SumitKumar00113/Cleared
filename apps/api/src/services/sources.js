@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Router } from 'express';
 import multer from 'multer';
-import { canAccessCollection, collectionMembersExist, deleteSource, getCollectionAccess, getSource, getSourceVersionRows, getSources, getStoredFile, markStoredFileDeleted, saveSourceVersion, setCollectionAccess } from './store.js';
+import { canAccessCollection, collectionMembersExist, deleteSource, getCollectionAccess, getSource, getSourceVersionRows, getSources, getStoredFile, markStoredFileDeleted, saveSourceVersion, setCollectionAccess, recordAuditEvent } from './store.js';
 import { requireRecentAuth, requireRole } from './auth.js';
 import { storeTextUpload, deleteStoredObject } from './private-files.js';
 
@@ -37,7 +37,9 @@ sourcesRouter.put('/collections/:category/access', requireRole(['owner','brand_m
   const userIds = request.body?.allowedUserIds;
   const knownRoles = ['owner','administrator','brand_manager','reviewer','creator'];
   if (!category || category.length > 100 || !Array.isArray(roles) || !Array.isArray(userIds) || roles.some((role) => !knownRoles.includes(role)) || userIds.some((id) => typeof id !== 'string') || new Set(userIds).size !== userIds.length || !collectionMembersExist(request.user.workspaceId, userIds)) return response.status(400).json({ error: 'Choose valid collection roles and workspace members.' });
-  return response.json({ data: setCollectionAccess(request.user.workspaceId, category, [...new Set(roles)], userIds, request.user.userId) });
+  const data=setCollectionAccess(request.user.workspaceId, category, [...new Set(roles)], userIds, request.user.userId);
+  recordAuditEvent({workspaceId:request.user.workspaceId,actorId:request.user.userId,action:'collection.access_changed',targetType:'collection',targetId:category,requestOrigin:request.get('origin')||request.get('referer')||null,details:{allowedRoles:data.allowedRoles,allowedUserCount:data.allowedUserIds.length}});
+  return response.json({ data });
 });
 sourcesRouter.get('/collections/:category/access', requireRole(['owner','brand_manager']), (request, response) => response.json({ data: getCollectionAccess(request.user.workspaceId, String(request.params.category || '').trim()) }));
 
@@ -58,7 +60,7 @@ sourcesRouter.post('/', canManageSources, upload.single('file'), async (request,
     const id = randomUUID();
     const uploaded = await storeTextUpload({ upload: request.file, request, purpose: 'source', resourceId: id, ownerId: request.user.userId });
     file = uploaded;
-    const version = { version: 1, fileId: uploaded.record.id, ownerId: request.user.userId, uploaderId: request.user.userId, checksum: uploaded.record.checksum, uploadedAt: uploaded.record.uploadedAt, expiresAt,requestOrigin:request.get('origin')||request.get('referer')||null };
+    const version = { version: 1, fileId: uploaded.record.id, ownerId: request.user.userId, uploaderId: request.user.userId, checksum: uploaded.record.checksum, uploadedAt: uploaded.record.uploadedAt, expiresAt, text: uploaded.text, requestOrigin:request.get('origin')||request.get('referer')||null };
     const source = { id, workspaceId: request.user.workspaceId, version: 1, name, category, updated: version.uploadedAt, uploadedAt: version.uploadedAt, owner: request.user.email, ownerId: request.user.userId, uploader: request.user.email, uploaderId: request.user.userId, type: uploaded.record.contentType.split(';')[0].toUpperCase(), fileName: uploaded.record.originalName, size: uploaded.record.size, checksum: version.checksum, fileId: uploaded.record.id, expiresAt: version.expiresAt, scanStatus: uploaded.record.scanStatus };
     saveSourceVersion(request.user.workspaceId, source, version);
     const responseSource = publicSource(source, uploaded, '');
@@ -81,7 +83,7 @@ sourcesRouter.post('/:id/versions', canManageSources, upload.single('file'), asy
     const versionNumber = Math.max(existing.version || 0, ...rows.map((item) => item.version)) + 1;
     const uploaded = await storeTextUpload({ upload: request.file, request, purpose: 'source', resourceId: existing.id, ownerId: existing.ownerId || request.user.userId, action: 'new_version' });
     file = uploaded;
-    const version = { version: versionNumber, fileId: uploaded.record.id, ownerId: existing.ownerId || request.user.userId, uploaderId: request.user.userId, checksum: uploaded.record.checksum, uploadedAt: uploaded.record.uploadedAt, expiresAt,requestOrigin:request.get('origin')||request.get('referer')||null };
+    const version = { version: versionNumber, fileId: uploaded.record.id, ownerId: existing.ownerId || request.user.userId, uploaderId: request.user.userId, checksum: uploaded.record.checksum, uploadedAt: uploaded.record.uploadedAt, expiresAt, text: uploaded.text, requestOrigin:request.get('origin')||request.get('referer')||null };
     const source = { ...existing, version: versionNumber, updated: version.uploadedAt, uploadedAt: version.uploadedAt, uploader: request.user.email, uploaderId: request.user.userId, type: uploaded.record.contentType.split(';')[0].toUpperCase(), fileName: uploaded.record.originalName, size: uploaded.record.size, checksum: version.checksum, fileId: uploaded.record.id, expiresAt: version.expiresAt, scanStatus: uploaded.record.scanStatus };
     saveSourceVersion(request.user.workspaceId, source, version);
     return response.status(201).json({ data: publicSource(source, uploaded, '') });

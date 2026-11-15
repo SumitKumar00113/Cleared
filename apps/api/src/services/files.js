@@ -38,6 +38,7 @@ filesRouter.post('/:fileId/link', (request, response) => {
   if (!mayOpen(file, request)) return response.status(404).json({ error: 'File not found or unavailable.' });
   const expiresAt = Math.floor(Date.now() / 1000) + LINK_TTL_SECONDS;
   const token = makeToken({ fileId: file.id, workspaceId: request.user.workspaceId, userId: request.user.userId, expiresAt });
+  recordFileAction({ workspaceId: request.user.workspaceId, fileId: file.id, actorId: request.user.userId, action: 'link_issued', details: { expiresAt: new Date(expiresAt * 1000).toISOString() }, requestOrigin: request.get('origin') || request.get('referer') || null });
   response.setHeader('Cache-Control', 'private, no-store');
   return response.json({ data: { url: `/api/files/${encodeURIComponent(file.id)}/download?token=${encodeURIComponent(token)}`, expiresAt: new Date(expiresAt * 1000).toISOString() } });
 });

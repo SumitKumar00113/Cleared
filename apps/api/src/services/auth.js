@@ -1,6 +1,6 @@
 import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Router } from 'express';
-import { acceptInvitation, activateMfa, authenticateUser, changeVerifiedEmail, checkAuthLimit, clearAuthFailures, clearAuthFailuresForAccount, completeMfaChallenge, consumeActionToken, consumeRequestLimit, consumeTotpStep, createActionToken, createMfaChallenge, createSession, createWorkspaceAccount, derivePasswordCredentials, getActionToken, getMfaChallenge, getMembership, getMfaUser, getSession, getUserByEmail, getUserById, invalidateOtherPasswordResetTokens, isCommonPassword, listActiveSessions, markSessionRecentlyAuthenticated, recordAuthFailure, recordAuditEvent, revokeListedSession, revokeSession, revokeUserSessions, savePendingMfaSecret, setEmailVerified, updatePassword } from './store.js';
+import { acceptInvitation, activateMfa, authenticateUser, changeVerifiedEmail, checkAuthLimit, clearAuthFailures, clearAuthFailuresForAccount, completeMfaChallenge, consumeActionToken, consumeRequestLimit, consumeTotpStep, createActionToken, createMfaChallenge, createSession, createWorkspaceAccount, derivePasswordCredentials, getActionToken, getMfaChallenge, getMembership, getMfaUser, getSession, getUserByEmail, getUserById, getUserWorkspaces, invalidateOtherPasswordResetTokens, isCommonPassword, listActiveSessions, markSessionRecentlyAuthenticated, recordAuthFailure, recordAuditEvent, revokeListedSession, revokeSession, revokeUserSessions, savePendingMfaSecret, setEmailVerified, updatePassword } from './store.js';
 import { sendMail } from './mailer.js';
 import { decryptTotpSecret, encryptTotpSecret, enrollmentUri, generateRecoveryCodes, generateTotpSecret, hashRecoveryCode, matchingTotpStep } from './mfa.js';
 
@@ -60,6 +60,9 @@ function rateLimited(request, response, next) {
   const pairKeys = keys.filter((key) => key.startsWith('pair:'));
   const limitedKeys=requestKeys(request,keys); const wait = Math.max(consumeRequestLimit(limitedKeys.filter((key) => key.startsWith('pair:')), 12, 15 * 60 * 1000), consumeRequestLimit(limitedKeys.filter((key) => key.startsWith('ip:')), 60, 15 * 60 * 1000), checkLimit(pairKeys));
   if (!wait) return next();
+  const account=getUserByEmail(email);
+  const membership=account&&request.body?.workspaceId?getMembership(String(request.body.workspaceId),account.id):null;
+  if(membership)recordAuditEvent({workspaceId:membership.workspaceId,actorId:membership.userId,action:'auth.lockout',targetType:'account',targetId:membership.userId,details:{route:request.path}});
   response.setHeader('Retry-After', String(wait));
   return response.status(429).json({ error: 'Unable to complete this request right now. Try again later.' });
 }
@@ -68,6 +71,7 @@ export function authRateLimit(request, response, next) {
   const keys = authKeys(request, request.user?.email || request.body?.email);
   const limitedKeys=requestKeys(request,keys); const wait = Math.max(consumeRequestLimit(limitedKeys.filter((key) => key.startsWith('pair:')), 12, 15 * 60 * 1000), consumeRequestLimit(limitedKeys.filter((key) => key.startsWith('ip:')), 60, 15 * 60 * 1000));
   if (!wait) return next();
+  if(request.user)recordAuditEvent({workspaceId:request.user.workspaceId,actorId:request.user.userId,action:'auth.lockout',targetType:'account',targetId:request.user.userId,details:{route:request.path}});
   response.setHeader('Retry-After', String(wait));
   return response.status(429).json({ error: 'Unable to complete this request right now. Try again later.' });
 }
@@ -108,7 +112,11 @@ authRouter.post('/workspaces', async (request, response, next) => {
     catch (error) { emailSent = false; mailFailure(error); }
     attachCookie(response, created.user, request);
     return response.status(201).json({ authenticated: true, user: sessionUser(created.user), verificationEmailSent: emailSent });
-  } catch (error) { if (String(error.code).startsWith('SQLITE_CONSTRAINT')) return response.status(409).json({ error: 'Could not create this account.' }); return next(error); }
+  } catch (error) {
+    const sqliteConstraint = String(error.code).startsWith('SQLITE_CONSTRAINT') || (Number.isInteger(error.errcode) && (error.errcode & 0xff) === 19);
+    if (sqliteConstraint) return response.status(409).json({ error: 'Could not create this account.' });
+    return next(error);
+  }
 });
 authRouter.post('/login', rateLimited, async (request, response, next) => {
   if (!ready()) return response.status(503).json({ error: 'Authentication service is not configured.' });
@@ -182,6 +190,7 @@ authRouter.post('/email/verify', authRateLimit, async (request, response) => {
   let oldEmail = user.email;
   const consumed = consumeActionToken(token, 'email_change', (row) => { oldEmail = getUserById(row.user_id).email; changeVerifiedEmail(row.user_id, row.target_email); });
   if (!consumed) return response.status(400).json({ error: 'This email link is invalid or expired.' });
+  for(const workspace of getUserWorkspaces(change.user_id))recordAuditEvent({workspaceId:workspace.id,actorId:change.user_id,action:'auth.email_changed',targetType:'account',targetId:change.user_id});
   try { await sendMail({ to: oldEmail, subject: 'Your Cleared email was changed', text: `The email on your Cleared account was changed to ${change.target_email}. If you did not request this, contact your workspace administrator.` }); }
   catch (error) { mailFailure(error); }
   return response.json({ verified: true, emailChanged: true, email: change.target_email });
@@ -223,6 +232,7 @@ authRouter.post('/password/reset', rateLimited, async (request, response) => {
   });
   if (!consumed) { recordAuthFailure(failureKeys); return response.status(400).json({ error: 'This password reset link is invalid or expired.' }); }
   clearAuthFailures(failureKeys);
+  for(const workspace of getUserWorkspaces(user.id))recordAuditEvent({workspaceId:workspace.id,actorId:user.id,action:'auth.password_reset',targetType:'account',targetId:user.id});
   return response.json({ reset: true });
 });
 authRouter.post('/email/change', requireAuth, authRateLimit, async (request, response, next) => {
@@ -239,6 +249,7 @@ authRouter.post('/email/change', requireAuth, authRateLimit, async (request, res
       await sendMail({ to: newEmail, subject: 'Confirm your Cleared email change', text: `Confirm this email address within 24 hours: ${verifyLink}` });
       await sendMail({ to: request.user.email, subject: 'Cleared email change requested', text: `A request was made to change the email on your Cleared account. If this was not you, reset your password and contact your administrator.` });
     } catch (error) { mailFailure(error); return response.status(503).json({ error: 'Could not send the email change messages. Please try again.' }); }
+    recordAuditEvent({workspaceId:request.user.workspaceId,actorId:request.user.userId,action:'auth.email_change_requested',targetType:'account',targetId:request.user.userId,requestOrigin:request.get('origin')||request.get('referer')||null});
     return response.status(202).json({ message: 'Check the new address to confirm the change.' });
   } catch (error) { return next(error); }
 });
@@ -247,7 +258,7 @@ authRouter.post('/mfa/challenge', rateLimited, (request, response) => {
   const email = String(request.body?.email || '').trim().toLowerCase();
   const keys = authKeys(request, email).filter((key) => key.startsWith('pair:'));
   const challenge = getMfaChallenge(token);
-  if (!challenge || challenge.email !== email) { recordAuthFailure(keys); return response.status(401).json({ error: 'The verification code or recovery code is incorrect.' }); }
+  if (!challenge || challenge.email !== email) { recordAuthFailure(keys); if(challenge)recordAuditEvent({workspaceId:challenge.workspaceId,actorId:challenge.userId,action:'mfa.challenge_failed',targetType:'user',targetId:challenge.userId}); return response.status(401).json({ error: 'The verification code or recovery code is incorrect.' }); }
   let completed;
   if (request.body?.recoveryCode) completed = completeMfaChallenge(token, { recoveryHash: hashRecoveryCode(request.body.recoveryCode) });
   else {
@@ -255,11 +266,13 @@ authRouter.post('/mfa/challenge', rateLimited, (request, response) => {
     const step = matchingTotpStep(secret, request.body?.code, Date.now(), challenge.lastStep);
     completed = step === null ? null : completeMfaChallenge(token, { step });
   }
-  if (!completed) { recordAuthFailure(keys); return response.status(401).json({ error: 'The verification code or recovery code is incorrect.' }); }
+  if (!completed) { recordAuthFailure(keys); recordAuditEvent({workspaceId:challenge.workspaceId,actorId:challenge.userId,action:'mfa.challenge_failed',targetType:'user',targetId:challenge.userId}); return response.status(401).json({ error: 'The verification code or recovery code is incorrect.' }); }
   clearAuthFailures(keys);
   const user = getMembership(completed.workspaceId, completed.userId);
   attachCookie(response, user, request, { mfaVerified: true });
   recordAuditEvent({workspaceId:completed.workspaceId,actorId:completed.userId,action:'auth.sign_in',targetType:'session',targetId:null,requestOrigin:request.get('origin')||request.get('referer')||null,details:{mfaVerified:true}});
+  recordAuditEvent({workspaceId:completed.workspaceId,actorId:completed.userId,action:'mfa.challenge_succeeded',targetType:'user',targetId:completed.userId,requestOrigin:request.get('origin')||request.get('referer')||null});
+  if(request.body?.recoveryCode)recordAuditEvent({workspaceId:completed.workspaceId,actorId:completed.userId,action:'mfa.recovery_code_used',targetType:'user',targetId:completed.userId,requestOrigin:request.get('origin')||request.get('referer')||null});
   return response.json({ authenticated: true, user: sessionUser({ ...user, mfaVerified: true }) });
 });
 authRouter.post('/mfa/enroll/start', requireAuth, authRateLimit, (request, response) => {
@@ -304,16 +317,20 @@ authRouter.post('/reauth', requireAuth, authRateLimit, async (request, response,
 authRouter.get('/sessions', requireAuth, (request, response) => response.json({ data: listActiveSessions(request.user.userId) }));
 authRouter.delete('/sessions/:sessionId', requireAuth, (request, response) => {
   const revoked = revokeListedSession(request.user.userId, request.params.sessionId);
+  if(revoked)recordAuditEvent({workspaceId:request.user.workspaceId,actorId:request.user.userId,action:'auth.session_revoked',targetType:'session',targetId:request.params.sessionId,requestOrigin:request.get('origin')||request.get('referer')||null});
   return revoked ? response.json({ revoked: true }) : response.status(404).json({ error: 'Session not found.' });
 });
 authRouter.post('/logout', (request, response) => {
   const id = rawCookie(request).split('.')[0];
+  const session=readSession(request);
   if (id) revokeSession(id);
+  if(session)recordAuditEvent({workspaceId:session.workspaceId,actorId:session.userId,action:'auth.sign_out',targetType:'session',targetId:session.id,requestOrigin:request.get('origin')||request.get('referer')||null});
   response.setHeader('Set-Cookie', [`${cookieName()}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`, `${csrfCookieName}=; Path=/; SameSite=Strict; Max-Age=0${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`]);
   return response.json({ authenticated: false });
 });
 authRouter.post('/logout-everywhere', requireAuth, (request, response) => {
   revokeUserSessions(request.user.userId);
+  recordAuditEvent({workspaceId:request.user.workspaceId,actorId:request.user.userId,action:'auth.sign_out_everywhere',targetType:'account',targetId:request.user.userId,requestOrigin:request.get('origin')||request.get('referer')||null});
   response.setHeader('Set-Cookie', [`${cookieName()}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`, `${csrfCookieName}=; Path=/; SameSite=Strict; Max-Age=0${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`]);
   return response.json({ authenticated: false, revoked: true });
 });

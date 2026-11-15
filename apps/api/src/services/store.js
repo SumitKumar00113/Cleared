@@ -52,6 +52,12 @@ CREATE TABLE IF NOT EXISTS account_action_tokens (id TEXT PRIMARY KEY, user_id T
 CREATE INDEX IF NOT EXISTS account_action_tokens_owner ON account_action_tokens(user_id,kind,expires_at);
 CREATE TABLE IF NOT EXISTS mfa_challenges (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, user_agent TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT);
 CREATE TABLE IF NOT EXISTS mfa_recovery_codes (user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, code_hash TEXT NOT NULL, created_at TEXT NOT NULL, used_at TEXT, PRIMARY KEY(user_id,code_hash));
+CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,review_id TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,created_at TEXT NOT NULL,read_at TEXT);
+CREATE INDEX IF NOT EXISTS notifications_inbox ON notifications(workspace_id,user_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS workspace_settings (workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,ai_check_enabled INTEGER NOT NULL DEFAULT 0,updated_by TEXT REFERENCES users(id),updated_at TEXT);
+CREATE TABLE IF NOT EXISTS verification_jobs (id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,review_id TEXT NOT NULL,revision_id TEXT NOT NULL,requested_by TEXT NOT NULL REFERENCES users(id),status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','cancelled')),attempt_count INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,available_at TEXT,started_at TEXT,finished_at TEXT,error_code TEXT,passage_ids TEXT NOT NULL DEFAULT '[]',characters_sent INTEGER NOT NULL DEFAULT 0);
+CREATE UNIQUE INDEX IF NOT EXISTS verification_jobs_active_revision ON verification_jobs(workspace_id,review_id,revision_id) WHERE status IN ('queued','running');
+CREATE TABLE IF NOT EXISTS verification_usage (workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,usage_day TEXT NOT NULL,jobs INTEGER NOT NULL DEFAULT 0,characters INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(workspace_id,usage_day));
 CREATE INDEX IF NOT EXISTS reviews_workspace ON reviews(workspace_id);
 CREATE INDEX IF NOT EXISTS sources_workspace ON sources(workspace_id);`);
 
@@ -104,14 +110,14 @@ if (!phase3Migration) {
     ALTER TABLE sources RENAME TO sources_legacy_phase3;
     CREATE TABLE reviews(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),title TEXT NOT NULL,owner_id TEXT NOT NULL REFERENCES users(id),owner_email TEXT NOT NULL,team TEXT NOT NULL DEFAULT 'Unassigned',status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,current_revision_id TEXT REFERENCES review_revisions(id) DEFERRABLE INITIALLY DEFERRED,file_id TEXT,file_name TEXT,findings_count INTEGER NOT NULL DEFAULT 0,verified_at TEXT);
     CREATE TABLE review_revisions(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,revision INTEGER NOT NULL,content TEXT NOT NULL,content_hash TEXT NOT NULL,editor_id TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,locked INTEGER NOT NULL DEFAULT 0,UNIQUE(review_id,revision));
-    CREATE TABLE claims(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,revision_id TEXT NOT NULL REFERENCES review_revisions(id) ON DELETE CASCADE,claim_text TEXT NOT NULL,verdict TEXT NOT NULL,source_id TEXT,source_version INTEGER,source_name TEXT,evidence TEXT,explanation TEXT,created_at TEXT NOT NULL);
-    CREATE TABLE findings(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,revision_id TEXT NOT NULL REFERENCES review_revisions(id) ON DELETE CASCADE,claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,source_id TEXT,source_version INTEGER,created_at TEXT NOT NULL);
+    CREATE TABLE claims(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,revision_id TEXT NOT NULL REFERENCES review_revisions(id) ON DELETE CASCADE,claim_text TEXT NOT NULL,verdict TEXT NOT NULL,source_id TEXT,source_version INTEGER,source_name TEXT,evidence TEXT,explanation TEXT,created_at TEXT NOT NULL,mode TEXT,model_name TEXT,prompt_version TEXT,passage_id TEXT,job_id TEXT);
+    CREATE TABLE findings(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,revision_id TEXT NOT NULL REFERENCES review_revisions(id) ON DELETE CASCADE,claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,source_id TEXT,source_version INTEGER,created_at TEXT NOT NULL,mode TEXT,model_name TEXT,prompt_version TEXT,passage_id TEXT,job_id TEXT);
     CREATE TABLE decisions(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,revision_id TEXT NOT NULL REFERENCES review_revisions(id),actor_id TEXT NOT NULL REFERENCES users(id),decision TEXT NOT NULL CHECK(decision IN ('Approved','Rejected','Needs changes')),created_at TEXT NOT NULL);
     CREATE TABLE sources(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),name TEXT NOT NULL,category TEXT NOT NULL,owner_id TEXT NOT NULL REFERENCES users(id),owner_email TEXT NOT NULL,uploader_id TEXT NOT NULL REFERENCES users(id),uploader_email TEXT NOT NULL,type TEXT NOT NULL DEFAULT '',file_name TEXT NOT NULL DEFAULT '',size INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,deleted_at TEXT);
     ALTER TABLE source_versions RENAME TO source_versions_legacy_phase3;
     CREATE TABLE source_versions(source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,version INTEGER NOT NULL,file_id TEXT REFERENCES stored_files(id),owner_id TEXT NOT NULL REFERENCES users(id),uploader_id TEXT NOT NULL REFERENCES users(id),checksum TEXT NOT NULL,uploaded_at TEXT NOT NULL,expires_at TEXT,scan_status TEXT NOT NULL DEFAULT 'quarantined' CHECK(scan_status IN ('quarantined','clean','rejected')),PRIMARY KEY(source_id,version));
     CREATE TABLE source_passages(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),source_id TEXT NOT NULL,version INTEGER NOT NULL,passage_number INTEGER NOT NULL,text TEXT NOT NULL,content_hash TEXT NOT NULL,FOREIGN KEY(source_id,version) REFERENCES source_versions(source_id,version) ON DELETE CASCADE);
-    CREATE TABLE audit_events(id TEXT PRIMARY KEY,workspace_id TEXT REFERENCES workspaces(id),actor_id TEXT REFERENCES users(id),action TEXT NOT NULL,target_type TEXT NOT NULL,target_id TEXT,occurred_at TEXT NOT NULL,request_origin TEXT,details TEXT NOT NULL DEFAULT '{}');
+    CREATE TABLE audit_events(id TEXT PRIMARY KEY,workspace_id TEXT REFERENCES workspaces(id),actor_id TEXT REFERENCES users(id),action TEXT NOT NULL,target_type TEXT NOT NULL,target_id TEXT,occurred_at TEXT NOT NULL,request_origin TEXT,details TEXT NOT NULL DEFAULT '{}',previous_hash TEXT,event_hash TEXT);
     CREATE INDEX reviews_workspace ON reviews(workspace_id,created_at);
     CREATE INDEX review_revisions_workspace ON review_revisions(workspace_id,review_id,revision);
     CREATE INDEX claims_workspace ON claims(workspace_id,review_id,revision_id);
@@ -161,6 +167,56 @@ if (!phase3Migration) {
   }
   db.exec('COMMIT');
 } else db.exec('DROP TABLE IF EXISTS file_action_events; DROP INDEX IF EXISTS file_action_events_workspace;');
+
+const claimColumns=new Set(db.prepare('PRAGMA table_info(claims)').all().map((column)=>column.name));
+for(const [column,type] of [['mode','TEXT'],['model_name','TEXT'],['prompt_version','TEXT'],['passage_id','TEXT'],['job_id','TEXT']]) if(!claimColumns.has(column)) db.exec(`ALTER TABLE claims ADD COLUMN ${column} ${type}`);
+const findingColumns=new Set(db.prepare('PRAGMA table_info(findings)').all().map((column)=>column.name));
+for(const [column,type] of [['mode','TEXT'],['model_name','TEXT'],['prompt_version','TEXT'],['passage_id','TEXT'],['job_id','TEXT']]) if(!findingColumns.has(column)) db.exec(`ALTER TABLE findings ADD COLUMN ${column} ${type}`);
+const jobColumns=new Set(db.prepare('PRAGMA table_info(verification_jobs)').all().map((column)=>column.name));
+if(!jobColumns.has('available_at'))db.exec('ALTER TABLE verification_jobs ADD COLUMN available_at TEXT');
+db.prepare('INSERT OR IGNORE INTO workspace_settings(workspace_id,ai_check_enabled) SELECT id,0 FROM workspaces').run();
+// Recover jobs interrupted during a process shutdown. They can be claimed again.
+db.prepare("UPDATE verification_jobs SET status='queued',started_at=NULL WHERE status='running'").run();
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+  return value;
+}
+function canonicalAuditContent(row) {
+  let details;
+  try { details = JSON.parse(row.details || '{}'); } catch { details = row.details || ''; }
+  return JSON.stringify({ id: row.id, workspaceId: row.workspace_id ?? null, actorId: row.actor_id ?? null, action: row.action, targetType: row.target_type, targetId: row.target_id ?? null, occurredAt: row.occurred_at, requestOrigin: row.request_origin ?? null, details: stableValue(details) });
+}
+function auditHash(previousHash, row) { return createHash('sha256').update(previousHash || '').update('\n').update(canonicalAuditContent(row)).digest('hex'); }
+
+// Add the chain columns to databases created before Phase 4b and backfill in
+// insertion order. This migration is idempotent and preserves existing rows.
+const auditColumns = new Set(db.prepare('PRAGMA table_info(audit_events)').all().map((column) => column.name));
+if (!process.env.CLEARED_SKIP_AUDIT_CHAIN_MIGRATION) {
+if ((!auditColumns.has('previous_hash')||!auditColumns.has('event_hash'))&&db.location()&&db.location()!==':memory:') {
+  const backupPath=`${db.location()}.audit-chain-${new Date().toISOString().replace(/[:.]/g,'-')}.bak.sqlite`;
+  db.exec(`VACUUM INTO '${backupPath.replaceAll("'","''")}'`);
+  console.info(`[migration] SQLite audit-chain backup created at ${backupPath}`);
+}
+if (!auditColumns.has('previous_hash')) db.exec('ALTER TABLE audit_events ADD COLUMN previous_hash TEXT');
+if (!auditColumns.has('event_hash')) db.exec('ALTER TABLE audit_events ADD COLUMN event_hash TEXT');
+if (db.prepare('SELECT 1 FROM audit_events WHERE event_hash IS NULL OR previous_hash IS NULL LIMIT 1').get()) {
+  db.exec('DROP TRIGGER IF EXISTS audit_events_no_update; DROP TRIGGER IF EXISTS audit_events_no_delete; BEGIN IMMEDIATE;');
+  const heads = new Map();
+  const update = db.prepare('UPDATE audit_events SET previous_hash=?,event_hash=? WHERE id=?');
+  for (const row of db.prepare('SELECT rowid AS sequence,* FROM audit_events ORDER BY rowid').all()) {
+    const key = row.workspace_id ?? '__unscoped__';
+    const previousHash = heads.get(key) || '';
+    const eventHash = auditHash(previousHash, row);
+    update.run(previousHash, eventHash, row.id);
+    heads.set(key, eventHash);
+  }
+  db.exec(`COMMIT;
+    CREATE TRIGGER audit_events_no_update BEFORE UPDATE ON audit_events BEGIN SELECT RAISE(ABORT,'audit_events is append-only'); END;
+    CREATE TRIGGER audit_events_no_delete BEFORE DELETE ON audit_events BEGIN SELECT RAISE(ABORT,'audit_events is append-only'); END;`);
+}
+}
 function transaction(callback) {
   db.exec('BEGIN IMMEDIATE');
   try { const result = callback(); db.exec('COMMIT'); return result; }
@@ -225,6 +281,68 @@ export function getUserWorkspaces(userId) {
   return db.prepare(`SELECT w.id,w.name,m.role FROM memberships m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=? ORDER BY w.created_at`).all(userId);
 }
 export function getWorkspace(workspaceId) { return db.prepare('SELECT id,name,created_at AS createdAt FROM workspaces WHERE id=?').get(workspaceId) || null; }
+export function getWorkspaceAIEnabled(workspaceId) { return Boolean(db.prepare('SELECT ai_check_enabled FROM workspace_settings WHERE workspace_id=?').get(workspaceId)?.ai_check_enabled); }
+export function setWorkspaceAIEnabled(workspaceId,enabled,actorId) {
+  db.prepare('INSERT INTO workspace_settings(workspace_id,ai_check_enabled,updated_by,updated_at) VALUES(?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET ai_check_enabled=excluded.ai_check_enabled,updated_by=excluded.updated_by,updated_at=excluded.updated_at').run(workspaceId,Number(Boolean(enabled)),actorId,now());
+  recordAuditEvent({workspaceId,actorId,action:'workspace.ai_setting_changed',targetType:'workspace',targetId:workspaceId,details:{enabled:Boolean(enabled)}});
+  return {enabled:Boolean(enabled)};
+}
+function shapeVerificationJob(row) { return row ? {id:row.id,workspaceId:row.workspace_id,reviewId:row.review_id,revisionId:row.revision_id,requestedBy:row.requested_by,status:row.status,attemptCount:row.attempt_count,createdAt:row.created_at,startedAt:row.started_at,finishedAt:row.finished_at,errorCode:row.error_code,passageIds:JSON.parse(row.passage_ids||'[]'),charactersSent:row.characters_sent} : null; }
+export function createVerificationJob(workspaceId,reviewId,revisionId,requestedBy) {
+  const active=db.prepare("SELECT * FROM verification_jobs WHERE workspace_id=? AND review_id=? AND revision_id=? AND status IN ('queued','running')").get(workspaceId,reviewId,revisionId);
+  if(active)return {job:shapeVerificationJob(active),created:false};
+  const id=randomUUID(),createdAt=now();
+  db.prepare("INSERT INTO verification_jobs(id,workspace_id,review_id,revision_id,requested_by,status,created_at,available_at) VALUES(?,?,?,?,?,'queued',?,?)").run(id,workspaceId,reviewId,revisionId,requestedBy,createdAt,createdAt);
+  return {job:getVerificationJob(workspaceId,id),created:true};
+}
+export function getVerificationJob(workspaceId,id) { return shapeVerificationJob(db.prepare('SELECT * FROM verification_jobs WHERE workspace_id=? AND id=?').get(workspaceId,id)); }
+export function getNextVerificationJob() {
+  return transaction(()=>{
+    const row=db.prepare("SELECT * FROM verification_jobs WHERE status='queued' AND COALESCE(available_at,created_at)<=? ORDER BY created_at,id LIMIT 1").get(now());
+    if(!row)return null;
+    const startedAt=now();
+    db.prepare("UPDATE verification_jobs SET status='running',attempt_count=attempt_count+1,started_at=? WHERE id=? AND status='queued'").run(startedAt,row.id);
+    return getVerificationJob(row.workspace_id,row.id);
+  });
+}
+export function finishVerificationJob(id,{status,errorCode=null,passageIds=[],charactersSent=0}) {
+  const result=db.prepare('UPDATE verification_jobs SET status=?,finished_at=?,error_code=?,passage_ids=?,characters_sent=? WHERE id=? AND status=\'running\'').run(status,now(),errorCode,JSON.stringify(passageIds),charactersSent,id);
+  return result.changes>0;
+}
+export function requeueVerificationJob(id,delayMs=0) { return db.prepare("UPDATE verification_jobs SET status='queued',started_at=NULL,available_at=? WHERE id=? AND status='running'").run(new Date(Date.now()+Math.max(0,delayMs)).toISOString(),id).changes>0; }
+export function failQueuedVerificationJob(id,errorCode) { return db.prepare("UPDATE verification_jobs SET status='failed',finished_at=?,error_code=? WHERE id=? AND status='queued'").run(now(),errorCode,id).changes>0; }
+export function countDailyVerificationJobs(workspaceId) {
+  return db.prepare('SELECT jobs FROM verification_usage WHERE workspace_id=? AND usage_day=?').get(workspaceId,now().slice(0,10))?.jobs||0;
+}
+export function reserveDailyVerificationJob(workspaceId,maxJobs) {
+  const day=now().slice(0,10);
+  const result=transaction(()=>{
+    const current=db.prepare('SELECT jobs FROM verification_usage WHERE workspace_id=? AND usage_day=?').get(workspaceId,day)?.jobs||0;
+    if(current>=maxJobs)return false;
+    db.prepare('INSERT INTO verification_usage(workspace_id,usage_day,jobs,characters) VALUES(?,?,1,0) ON CONFLICT(workspace_id,usage_day) DO UPDATE SET jobs=jobs+1').run(workspaceId,day);
+    return true;
+  });
+  return result;
+}
+export function reserveDailyVerificationCharacters(workspaceId,amount,maxCharacters) {
+  const day=now().slice(0,10),chars=Math.max(0,Number(amount)||0);
+  const result=transaction(()=>{
+    const current=db.prepare('SELECT characters FROM verification_usage WHERE workspace_id=? AND usage_day=?').get(workspaceId,day)?.characters||0;
+    if(current+chars>maxCharacters)return false;
+    db.prepare('INSERT INTO verification_usage(workspace_id,usage_day,jobs,characters) VALUES(?,?,0,?) ON CONFLICT(workspace_id,usage_day) DO UPDATE SET characters=characters+excluded.characters').run(workspaceId,day,chars);
+    return true;
+  });
+  return result;
+}
+export function getLatestCleanPassages(workspaceId) {
+  return db.prepare(`SELECT p.id AS passageId,p.workspace_id AS workspaceId,p.source_id AS sourceId,p.version,p.text,s.name,s.category,v.expires_at AS expiresAt
+    FROM source_passages p JOIN sources s ON s.id=p.source_id AND s.workspace_id=p.workspace_id
+    JOIN source_versions v ON v.source_id=p.source_id AND v.version=p.version AND v.workspace_id=p.workspace_id
+    LEFT JOIN stored_files f ON f.id=v.file_id AND f.workspace_id=v.workspace_id
+    WHERE p.workspace_id=? AND p.version=(SELECT MAX(v2.version) FROM source_versions v2 WHERE v2.workspace_id=p.workspace_id AND v2.source_id=p.source_id)
+    AND COALESCE(f.scan_status,v.scan_status)='clean' AND (f.deleted_at IS NULL OR f.id IS NULL) AND s.deleted_at IS NULL
+    AND (v.expires_at IS NULL OR v.expires_at>?) ORDER BY p.source_id,p.passage_number`).all(workspaceId,now());
+}
 export function createActionToken({ userId, kind, targetEmail = null, ttlMs }) {
   const token = randomBytes(32).toString('base64url');
   const timestamp = now();
@@ -406,6 +524,17 @@ export function listMembers(workspaceId) {
   return db.prepare(`SELECT u.id AS userId,u.email,m.role,u.created_at AS joinedAt
     FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=? ORDER BY u.created_at`).all(workspaceId);
 }
+export function createReviewNotifications(workspaceId, userIds, reviewId, title, body) {
+  const insert=db.prepare('INSERT INTO notifications(id,workspace_id,user_id,review_id,title,body,created_at) VALUES(?,?,?,?,?,?,?)');
+  const at=now();
+  transaction(()=>{ for(const userId of new Set(userIds)) insert.run(randomUUID(),workspaceId,userId,reviewId,String(title).slice(0,160),String(body).slice(0,500),at); });
+}
+export function getNotifications(workspaceId,userId) {
+  return db.prepare('SELECT id,review_id AS reviewId,title,body,created_at AS createdAt,read_at AS readAt FROM notifications WHERE workspace_id=? AND user_id=? ORDER BY created_at DESC LIMIT 50').all(workspaceId,userId);
+}
+export function markNotificationRead(workspaceId,userId,id) {
+  return db.prepare('UPDATE notifications SET read_at=COALESCE(read_at,?) WHERE workspace_id=? AND user_id=? AND id=?').run(now(),workspaceId,userId,id).changes>0;
+}
 export function getWorkspaceMemberByEmail(workspaceId, email) {
   return db.prepare(`SELECT u.id AS userId,u.email,m.role FROM memberships m
     JOIN users u ON u.id=m.user_id WHERE m.workspace_id=? AND u.email=?`)
@@ -426,7 +555,36 @@ export function removeMember(workspaceId, userId) {
   });
 }
 export function recordAuditEvent({ workspaceId = null, actorId = null, action, targetType, targetId = null, occurredAt = now(), requestOrigin = null, details = {} }) {
-  db.prepare('INSERT INTO audit_events(id,workspace_id,actor_id,action,target_type,target_id,occurred_at,request_origin,details) VALUES(?,?,?,?,?,?,?,?,?)').run(randomUUID(),workspaceId,actorId,action,targetType,targetId,occurredAt,requestOrigin,JSON.stringify(details));
+  const id=randomUUID(), canonicalRow={id,workspace_id:workspaceId,actor_id:actorId,action,target_type:targetType,target_id:targetId,occurred_at:occurredAt,request_origin:requestOrigin,details:JSON.stringify(details)};
+  const previousHash=db.prepare('SELECT event_hash FROM audit_events WHERE workspace_id IS ? ORDER BY rowid DESC LIMIT 1').get(workspaceId)?.event_hash || '';
+  const eventHash=auditHash(previousHash,canonicalRow);
+  db.prepare('INSERT INTO audit_events(id,workspace_id,actor_id,action,target_type,target_id,occurred_at,request_origin,details,previous_hash,event_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(id,workspaceId,actorId,action,targetType,targetId,occurredAt,requestOrigin,canonicalRow.details,previousHash,eventHash);
+}
+export function verifyAuditChain(workspaceId) {
+  const rows=db.prepare('SELECT rowid AS sequence,* FROM audit_events WHERE workspace_id=? ORDER BY rowid').all(workspaceId);
+  let previousHash='';
+  for (let index=0;index<rows.length;index+=1) {
+    const row=rows[index];
+    if (row.previous_hash!==previousHash) return {intact:false,checkedEvents:index,firstBreak:{eventId:row.id,sequence:row.sequence,reason:'previous_hash_mismatch'}};
+    const expectedHash=auditHash(previousHash,row);
+    if (row.event_hash!==expectedHash) return {intact:false,checkedEvents:index,firstBreak:{eventId:row.id,sequence:row.sequence,reason:'event_hash_mismatch'}};
+    previousHash=row.event_hash;
+  }
+  return {intact:true,checkedEvents:rows.length,firstBreak:null};
+}
+export function verifyAllAuditChains() {
+  return db.prepare('SELECT DISTINCT workspace_id AS workspaceId FROM audit_events WHERE workspace_id IS NOT NULL ORDER BY workspace_id').all()
+    .map(({workspaceId})=>({workspaceId,...verifyAuditChain(workspaceId)}));
+}
+export function rollbackAuditChain() {
+  const columns=new Set(db.prepare('PRAGMA table_info(audit_events)').all().map((column)=>column.name));
+  db.exec('BEGIN IMMEDIATE; DROP TRIGGER IF EXISTS audit_events_no_update; DROP TRIGGER IF EXISTS audit_events_no_delete;');
+  try {
+    if (columns.has('event_hash')) db.exec('ALTER TABLE audit_events DROP COLUMN event_hash');
+    if (columns.has('previous_hash')) db.exec('ALTER TABLE audit_events DROP COLUMN previous_hash');
+    db.exec(`CREATE TRIGGER audit_events_no_update BEFORE UPDATE ON audit_events BEGIN SELECT RAISE(ABORT,'audit_events is append-only'); END;
+      CREATE TRIGGER audit_events_no_delete BEFORE DELETE ON audit_events BEGIN SELECT RAISE(ABORT,'audit_events is append-only'); END; COMMIT;`);
+  } catch(error) { db.exec('ROLLBACK');throw error; }
 }
 export function listAuditEvents(workspaceId, { limit = 500, before = null } = {}) {
   const cap=Math.max(1,Math.min(1000,Number(limit)||500));
@@ -443,9 +601,9 @@ export function reviewHistory(workspaceId, reviewId) {
 const reviewSelect = `SELECT r.*,v.content,v.revision,v.content_hash AS contentHash FROM reviews r LEFT JOIN review_revisions v ON v.id=r.current_revision_id`;
 function shapeReview(row) {
   if (!row) return null;
-  const claimResults = db.prepare('SELECT c.claim_text AS claim,c.verdict,c.source_id AS sourceId,c.source_version AS sourceVersion,c.source_name AS sourceName,c.evidence,c.explanation FROM claims c WHERE c.review_id=? AND c.revision_id=? ORDER BY c.rowid').all(row.id,row.current_revision_id);
-  const { id,workspace_id:workspaceId,title,content,file_id:fileId,file_name:fileName,owner_email:owner,owner_id:ownerId,team,status,created_at:date,updated_at:updatedAt,findings_count:findings,verified_at:verifiedAt,revision,contentHash } = row;
-  return { id,workspaceId,title,content:content || '',fileId,fileName,owner,ownerId,team,status,date,updatedAt,findings,verifiedAt,revision:revision || 1,contentHash,claimResults };
+  const claimResults = db.prepare('SELECT c.claim_text AS claim,c.verdict,c.source_id AS sourceId,c.source_version AS sourceVersion,c.source_name AS sourceName,c.evidence,c.explanation,c.mode,c.model_name AS modelName,c.prompt_version AS promptVersion,c.passage_id AS passageId,c.job_id AS jobId FROM claims c WHERE c.review_id=? AND c.revision_id=? ORDER BY c.rowid').all(row.id,row.current_revision_id);
+  const { id,workspace_id:workspaceId,title,content,file_id:fileId,file_name:fileName,owner_email:owner,owner_id:ownerId,team,status,created_at:date,updated_at:updatedAt,findings_count:findings,verified_at:verifiedAt,revision,contentHash,current_revision_id:currentRevisionId } = row;
+  return { id,workspaceId,title,content:content || '',fileId,fileName,owner,ownerId,team,status,date,updatedAt,findings,verifiedAt,revision:revision || 1,currentRevisionId,contentHash,claimResults };
 }
 export function saveReview(workspaceId, record, actorId = record.ownerId, requestOrigin = null, { recordDecision = true } = {}) {
   const previous = getReview(workspaceId,record.id);
@@ -478,8 +636,8 @@ export function saveReview(workspaceId, record, actorId = record.ownerId, reques
     db.prepare('DELETE FROM claims WHERE review_id=? AND revision_id=?').run(record.id,revisionId);
     for (const item of record.claimResults || []) {
       const claimId=randomUUID();
-      db.prepare('INSERT INTO claims(id,workspace_id,review_id,revision_id,claim_text,verdict,source_id,source_version,source_name,evidence,explanation,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(claimId,workspaceId,record.id,revisionId,String(item.claim || ''),item.verdict || 'Not enough evidence',item.sourceId || null,item.sourceVersion || null,item.sourceName || null,item.evidence || null,item.explanation || '',at);
-      if (item.verdict!=='Supported') db.prepare('INSERT INTO findings(id,workspace_id,review_id,revision_id,claim_id,source_id,source_version,created_at) VALUES(?,?,?,?,?,?,?,?)').run(randomUUID(),workspaceId,record.id,revisionId,claimId,item.sourceId||null,item.sourceVersion||null,at);
+      db.prepare('INSERT INTO claims(id,workspace_id,review_id,revision_id,claim_text,verdict,source_id,source_version,source_name,evidence,explanation,created_at,mode,model_name,prompt_version,passage_id,job_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(claimId,workspaceId,record.id,revisionId,String(item.claim || ''),item.verdict || 'Not enough evidence',item.sourceId || null,item.sourceVersion || null,item.sourceName || null,item.evidence || null,item.explanation || '',at,item.mode||null,item.modelName||null,item.promptVersion||null,item.passageId||null,item.jobId||null);
+      if (item.verdict!=='Supported') db.prepare('INSERT INTO findings(id,workspace_id,review_id,revision_id,claim_id,source_id,source_version,created_at,mode,model_name,prompt_version,passage_id,job_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(randomUUID(),workspaceId,record.id,revisionId,claimId,item.sourceId||null,item.sourceVersion||null,at,item.mode||null,item.modelName||null,item.promptVersion||null,item.passageId||null,item.jobId||null);
     }
   });
 }
@@ -509,6 +667,9 @@ export function saveSourceVersion(workspaceId, source, version) {
   transaction(() => {
     saveSource(workspaceId,source);
     db.prepare('INSERT INTO source_versions(source_id,workspace_id,version,file_id,owner_id,uploader_id,checksum,uploaded_at,expires_at,scan_status) VALUES(?,?,?,?,?,?,?,?,?,?)').run(source.id, workspaceId, version.version, version.fileId, version.ownerId, version.uploaderId, version.checksum, version.uploadedAt, version.expiresAt || null, version.scanStatus || 'quarantined');
+    const passages=String(version.text||'').split(/\n{2,}/).flatMap((paragraph)=>paragraph.match(/[^.!?\n]+[.!?]+["')\]]*|[^.!?\n]+$/g)||[]).map((text)=>text.trim()).filter(Boolean);
+    const insertPassage=db.prepare('INSERT INTO source_passages(id,workspace_id,source_id,version,passage_number,text,content_hash) VALUES(?,?,?,?,?,?,?)');
+    passages.forEach((text,index)=>insertPassage.run(randomUUID(),workspaceId,source.id,version.version,index+1,text,createHash('sha256').update(text).digest('hex')));
     recordAuditEvent({workspaceId,actorId:version.uploaderId,action:version.version>1?'source.new_version':'source.upload',targetType:'source',targetId:source.id,occurredAt:version.uploadedAt,requestOrigin:version.requestOrigin||null,details:{version:version.version,checksum:version.checksum}});
   });
 }

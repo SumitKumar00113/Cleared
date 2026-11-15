@@ -7,6 +7,7 @@ import { reviewsRouter } from './services/reviews.js';
 import { sourcesRouter } from './services/sources.js';
 import { authRouter, csrfProtection, requireWorkspaceAuth } from './services/auth.js';
 import { verificationRouter } from './services/verification.js';
+import { notificationsRouter } from './services/notifications.js';
 import { workspaceRouter } from './services/workspace.js';
 import { filesRouter } from './services/files.js';
 import { encryptionKey } from './services/mfa.js';
@@ -83,13 +84,15 @@ export function createApp() {
   app.use('/api/files', filesRouter);
   app.use('/api/workspace', workspaceRouter);
   app.use('/api/reviews', reviewsRouter);
+  app.use('/api/notifications', notificationsRouter);
   app.use('/api/sources', sourcesRouter);
   app.use('/api/verification', verificationRouter);
   app.use((error, _request, response, _next) => {
     if (error.name === 'MulterError') return response.status(400).json({ error: error.code === 'LIMIT_FILE_SIZE' ? 'Files must be 20 MB or smaller.' : 'Upload one file at a time.' });
     if (error.status) return response.status(error.status).json({ error: error.message });
     if (error.message.startsWith('Use a ')) return response.status(400).json({ error: error.message });
-    console.error('Request failed:', error.name || 'Error');
+    if (process.env.NODE_ENV !== 'production') console.error('Request failed:', error);
+    else console.error('Request failed:', error.name || 'Error');
     response.status(500).json({ error: 'The request could not be completed.' });
   });
   return app;

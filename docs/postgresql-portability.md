@@ -4,7 +4,7 @@ The active runtime remains Express with SQLite. These notes prepare a future man
 
 ## Current tenant-owned relations
 
-The normalized SQLite tables are `reviews`, `review_revisions`, `claims`, `findings`, `decisions`, `sources`, `source_versions`, `source_passages`, `stored_files`, `collection_access`, and `audit_events`. Each contains or references `workspace_id`; preserve workspace scoping on every parent and child query. `review_revisions`, claims/findings, decisions, and source passages carry workspace IDs so authorization checks can be applied directly rather than inferred only through a parent join.
+The normalized SQLite tables include `reviews`, `review_revisions`, `claims`, `findings`, `decisions`, `sources`, `source_versions`, `source_passages`, `stored_files`, `collection_access`, `audit_events`, and `notifications`. Preserve workspace scoping on every workspace-owned parent and child query. `review_revisions`, claims/findings, decisions, source passages, and notifications carry workspace IDs so authorization checks can be applied directly rather than inferred only through a parent join. Notifications are also scoped to their recipient user.
 
 ## RLS preparation
 

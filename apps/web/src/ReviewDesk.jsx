@@ -1,7 +1,7 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { gsap } from 'gsap';
 import { apiFetchRecent } from './api.js';
-import { ArrowRight, Check, Clock3, FileText, FolderOpen, Search, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { ArrowRight, Bell, Check, Clock3, FileText, FolderOpen, Search, ShieldCheck, Sparkles, X } from 'lucide-react';
 import './review-desk.css';
 
 const columns = [
@@ -28,6 +28,8 @@ export default function ReviewDesk() {
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
   const [account, setAccount] = useState(null);
+  const [notifications, setNotifications] = useState([]);
+  const [showNotifications, setShowNotifications] = useState(false);
 
   useEffect(() => {
     document.title = 'Cleared: Review desk';
@@ -36,11 +38,13 @@ export default function ReviewDesk() {
       fetch('/api/reviews').then((response) => { if (!response.ok) throw new Error('Could not load reviews.'); return response.json(); }),
       fetch('/api/sources').then((response) => { if (!response.ok) throw new Error('Could not load sources.'); return response.json(); }),
       fetch('/api/auth/session').then((response) => response.json()),
-    ]).then(([reviewResult, sourceResult, sessionResult]) => {
+      fetch('/api/notifications').then((response) => { if (!response.ok) throw new Error('Could not load notifications.'); return response.json(); }),
+    ]).then(([reviewResult, sourceResult, sessionResult, notificationResult]) => {
       if (!active) return;
       setReviews(reviewResult.data || []);
       setSources(sourceResult.data || []);
       setAccount(sessionResult.user);
+      setNotifications(notificationResult.data || []);
     }).catch(() => { if (active) setError('The workspace could not reach the API. Start the Node service and refresh.'); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
@@ -83,8 +87,18 @@ export default function ReviewDesk() {
     finally { setSaving(false); setDragged(null); }
   }
 
+  async function openNotification(notification) {
+    if (!notification.readAt) {
+      const response = await apiFetch(`/api/notifications/${encodeURIComponent(notification.id)}/read`, { method: 'PATCH' });
+      if (response.ok) setNotifications((items) => items.map((item) => item.id === notification.id ? { ...item, readAt: new Date().toISOString() } : item));
+    }
+    const review = reviews.find((item) => item.id === notification.reviewId);
+    if (review) setSelected(review);
+    setShowNotifications(false);
+  }
+
   return <main className="review-desk" ref={pageRef}>
-    <header className="desk-bar"><div className="desk-brand"><a className="desk-logo" href="/"><span><Check size={17}/></span>cleared</a><span className="workspace-switch"><b>{account?.email?.slice(0,1).toUpperCase() || "U"}</b>{account?.workspace?.name || "Workspace"}</span></div><nav className="desk-nav" aria-label="Workspace navigation"><a href="/dashboard">Overview</a><a className="selected" href="/workspace">Reviews</a><a href="/workspace#sources">Approved sources</a><a href="/app">Claim checking status</a></nav><div className="desk-tools"><span className="desk-demo">{account?.email || "Workspace"}</span><a className="desk-help" href="/workspace" aria-label="Open review workspace"><FileText size={17}/></a></div></header>
+    <header className="desk-bar"><div className="desk-brand"><a className="desk-logo" href="/"><span><Check size={17}/></span>cleared</a><span className="workspace-switch"><b>{account?.email?.slice(0,1).toUpperCase() || "U"}</b>{account?.workspace?.name || "Workspace"}</span></div><nav className="desk-nav" aria-label="Workspace navigation"><a href="/dashboard">Overview</a><a className="selected" href="/workspace">Reviews</a><a href="/workspace#sources">Approved sources</a><a href="/app">Claim checking status</a></nav><div className="desk-tools"><span className="desk-demo">{account?.email || "Workspace"}</span><div className="notification-control"><button className="desk-help notification-button" type="button" aria-label={`Notifications${notifications.some((item)=>!item.readAt)?', unread':''}`} aria-expanded={showNotifications} onClick={()=>setShowNotifications((value)=>!value)}><Bell size={17}/>{notifications.some((item)=>!item.readAt)&&<i/>}</button>{showNotifications&&<section className="notification-menu" aria-label="Notifications"><h2>Notifications</h2>{notifications.length?notifications.map((item)=><button key={item.id} type="button" className={`notification-item ${item.readAt?'':'unread'}`} onClick={()=>openNotification(item)}><strong>{item.title}</strong><span>{item.body}</span><time>{new Date(item.createdAt).toLocaleString()}</time></button>):<p>No notifications yet.</p>}</section>}</div><a className="desk-help" href="/workspace" aria-label="Open review workspace"><FileText size={17}/></a></div></header>
     <div className="governance-wrap" id="top">
       <section className="hello"><div><div className="desk-date"><i/>{dateLabel}<span>·</span>Review workspace</div><h1>Your content, <em>cleared.</em></h1><p className="desk-summary">{reviews.length ? <>{totals.review} {totals.review === 1 ? 'review is' : 'reviews are'} with reviewers, {totals.changes} need a second look, and {totals.approved} {totals.approved === 1 ? 'is' : 'are'} approved.{totals.rejected > 0 && <> {totals.rejected} {totals.rejected === 1 ? 'was' : 'were'} rejected.</>}</> : 'A shared desk for every draft, source, and human decision.'}</p></div><a className="new-review" href="/dashboard?new=review"><span>+</span>New review<ArrowRight size={17}/></a></section>
       {error && <div className="desk-error" role="alert">{error}</div>}

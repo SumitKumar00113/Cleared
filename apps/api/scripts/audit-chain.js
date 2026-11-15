@@ -1,3 +1,4 @@
+import '../src/env.js';
 import { existsSync, copyFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';

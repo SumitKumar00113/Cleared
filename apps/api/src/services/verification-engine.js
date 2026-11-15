@@ -29,7 +29,7 @@ function factAtoms(text) {
   const input=String(text||'');
   const atoms=[];
   for(const match of input.matchAll(/\b(\d+(?:[.,]\d+)?)\s*(%|percent(?:age)?)/gi)) atoms.push({type:'percent',value:Number(match[1].replace(',','.'))});
-  for(const match of input.matchAll(/([$€£₹])\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g)) atoms.push({type:`currency_${match[1]}`,value:Number(match[2].replaceAll(',',''))});
+  for(const match of input.matchAll(/([\p{Sc}])\s*(\d+(?:,\d{3})*(?:\.\d+)?)/gu)) atoms.push({type:`currency_${match[1]}`,value:Number(match[2].replaceAll(',',''))});
   for(const match of input.matchAll(/\b(\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{2,4}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?|(?:19|20)\d{2})\b/gi)) atoms.push({type:'date',value:match[1].toLowerCase().replace(/\s+/g,' ')});
   for(const match of input.matchAll(/\b(\d+(?:[.,]\d+)?)\b/g)) {
     const number=Number(match[1].replace(',','.'));
@@ -47,7 +47,7 @@ function sourceQuoteForAtom(passage,atom) {
   const sentences=splitSentences(passage.text);
   return sentences.find((item)=>factAtoms(item.text).some((sourceAtom)=>sourceAtom.type===atom.type&&sourceAtom.value!==atom.value))?.text||passage.text;
 }
-function normalized(text) { return String(text||'').toLocaleLowerCase().replace(/[^\p{L}\p{N}%$€£₹]+/gu,' ').trim(); }
+function normalized(text) { return String(text||'').toLocaleLowerCase().replace(/[^\p{L}\p{N}%\p{Sc}]+/gu,' ').trim(); }
 export function namedTerms(text) { return [...new Set((String(text||'').match(/\b(?:[A-Z][a-z][\p{L}\p{N}-]*|[A-Z]{2,})\b/gu)||[]).filter((term)=>!GENERIC_CAPITALS.has(term)))]; }
 export function evidenceCoversNamedTerms(claim,evidence) { const lower=String(evidence||'').toLocaleLowerCase();return namedTerms(claim).every((term)=>lower.includes(term.toLocaleLowerCase())); }
 export function deterministicCheck(sentence,rankedPassages) {

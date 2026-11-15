@@ -34,3 +34,18 @@ test('uncovered sentences are deterministic and do not gain a retrieval passage'
   assert.deepEqual(rankPassages(sentence,[{passageId:'p1',text:'Approved brand sources are kept in collections.'}]),[]);
   assert.equal(deterministicCheck(sentence,[]).verdict,'Not enough evidence');
 });
+
+test('deterministic checks detect conflicting currency symbols and retain exact source evidence',()=>{
+  for(const [currency,claim,source] of [
+    ['USD','Atlas budget is $800.','Atlas budget is $500.'],
+    ['EUR','Boreal budget is €800.','Boreal budget is €500.'],
+    ['GBP','Cedar budget is £800.','Cedar budget is £500.'],
+    ['INR','Delta budget is ₹800.','Delta budget is ₹500.'],
+  ]) {
+    const passage={passageId:`p-${currency}`,sourceId:`s-${currency}`,version:1,name:'Invented budget',text:source};
+    const result=deterministicCheck(claim,rankPassages(claim,[passage]));
+    assert.equal(result.verdict,'Contradicted',currency);
+    assert.equal(result.evidence,source,currency);
+    assert.equal(result.passageId,passage.passageId,currency);
+  }
+});

@@ -586,6 +586,34 @@ test('verification jobs are idempotent for an active revision and hidden across 
   assert.equal(completed.data.data.job.status,'succeeded');
   assert.ok(completed.data.data.claims.every((claim)=>claim.verdict==='Not enough evidence'));
   assert.equal((await get(`/api/verification/jobs/${first.job.id}`,jarA)).data.data.job.status,'succeeded');
+
+  const day=new Date().toISOString().slice(0,10),cap=Number(process.env.VERIFICATION_DAILY_JOB_CAP)||100;
+  const db=new DatabaseSync(process.env.CLEARED_DB_PATH);
+  const previousUsage=db.prepare('SELECT * FROM verification_usage WHERE workspace_id=? AND usage_day=?').get(ownerA.workspace.id,day);
+  db.prepare('INSERT INTO verification_usage(workspace_id,usage_day,jobs,characters) VALUES(?,?,?,0) ON CONFLICT(workspace_id,usage_day) DO UPDATE SET jobs=excluded.jobs').run(ownerA.workspace.id,day,cap);
+  db.prepare('DELETE FROM request_limits WHERE bucket=?').run(`verification:${ownerA.workspace.id}`);
+  db.close();
+  const cappedReview={id:'review-job-cap',title:'Invented daily cap case',content:'A fictional daily cap claim.',status:'In review',ownerId:ownerA.user.userId};
+  store.saveReview(ownerA.workspace.id,cappedReview,ownerA.user.userId);
+  const capped=await write(`/api/verification/check/${cappedReview.id}`,jarA,csrfA,'POST');
+  assert.equal(capped.status,429);
+  assert.ok(store.listAuditEvents(ownerA.workspace.id).some((event)=>event.action==='verification.cap_hit'&&event.details.cap==='daily_jobs'));
+  const restore=new DatabaseSync(process.env.CLEARED_DB_PATH);
+  if(previousUsage)restore.prepare('UPDATE verification_usage SET jobs=?,characters=? WHERE workspace_id=? AND usage_day=?').run(previousUsage.jobs,previousUsage.characters,ownerA.workspace.id,day);
+  else restore.prepare('DELETE FROM verification_usage WHERE workspace_id=? AND usage_day=?').run(ownerA.workspace.id,day);
+  restore.close();
+});
+
+test('verification jobs left running are recovered as queued work after restart', () => {
+  const review={id:'review-restart-recovery',title:'Invented restart case',content:'A fictional restart recovery claim.',status:'In review',ownerId:ownerA.user.userId};
+  store.saveReview(ownerA.workspace.id,review,ownerA.user.userId);
+  const created=store.createVerificationJob(ownerA.workspace.id,review.id,store.getReview(ownerA.workspace.id,review.id).currentRevisionId,ownerA.user.userId);
+  const db=new DatabaseSync(process.env.CLEARED_DB_PATH);
+  db.prepare("UPDATE verification_jobs SET status='running',started_at=? WHERE id=?").run(new Date().toISOString(),created.job.id);
+  db.close();
+  assert.equal(store.recoverInterruptedVerificationJobs(),1);
+  assert.equal(store.getVerificationJob(ownerA.workspace.id,created.job.id).status,'queued');
+  assert.equal(store.getVerificationJob(ownerA.workspace.id,created.job.id).startedAt,null);
 });
 
 test('review history and audit list/export remain isolated across workspaces', async () => {
@@ -701,6 +729,9 @@ test('verification treats hostile text as delimited input and validates model ou
     assert.match(requestBody.contents[0].parts[0].text,/SOURCE_[a-f0-9]{32}/);
     assert.equal(requestBody.tools,undefined);
     assert.equal(requestBody.generationConfig.temperature,0.1);
+    assert.equal(requestBody.generationConfig.responseSchema.properties.claims.items.properties.evidence.nullable,undefined);
+    assert.equal(requestBody.generationConfig.responseSchema.properties.claims.items.additionalProperties,false);
+    assert.equal(requestBody.generationConfig.responseSchema.additionalProperties,false);
     calls=0;
     globalThis.fetch=async()=>{calls+=1;return Response.json({candidates:[{content:{parts:[{text:JSON.stringify({claims:[{sentenceId:'s1',verdict:'Supported',sourceId:'source-mossline',passageId:'passage-mossline',evidence:'Mossline has 25 staff.',explanation:'Malformed.',unexpected:'field'}]})}]}}]});};
     await assert.rejects(evaluateInventedFixture(fixture),/invalid_output/);
@@ -749,19 +780,41 @@ test('bad text, multiple files, oversized files, and quarantined files are rejec
   store.saveReview(ownerA.workspace.id,{id:'review-retrieval',title:'Invented passage test',content:'Version two source.',status:'In review',ownerId:ownerA.user.userId},ownerA.user.userId);
   process.env.GEMINI_API_KEY = 'test-key';
   const originalFetch = globalThis.fetch;
-  let geminiRequest = '';
+  let geminiRequest = '',geminiCalls=0;
   try {
     globalThis.fetch = async (url, options) => {
       if (!String(url).includes('generativelanguage.googleapis.com')) return originalFetch(url, options);
+      geminiCalls+=1;
+      if(geminiCalls===1)return Response.json({error:{message:'temporary provider issue'}},{status:503});
       geminiRequest = options.body;
       const passage=store.getLatestCleanPassages(ownerA.workspace.id).find((item)=>item.text.includes('Version two source.'));
       return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({claims:[{sentenceId:'s1',verdict:'Supported',sourceId:passage.sourceId,passageId:passage.passageId,evidence:'Version two source.',explanation:'Exact text.'}]}) }] } }] });
     };
     const result = await write('/api/verification/check/review-retrieval?wait=true', jarA, csrfA, 'POST');
     assert.equal(result.status, 200);
+    assert.equal(geminiCalls,2,'transient provider failures get one job retry');
+    assert.equal(result.data.data.job.attemptCount,2);
     assert.match(geminiRequest, /Version two source/);
     assert.doesNotMatch(geminiRequest, /Must stay unavailable/);
     assert.ok(result.data.data.claims.every((claim)=>claim.jobId&&claim.passageId));
+
+    const day=new Date().toISOString().slice(0,10),cap=Number(process.env.VERIFICATION_DAILY_CHAR_CAP)||1_000_000;
+    const dbCap=new DatabaseSync(process.env.CLEARED_DB_PATH);
+    const usageBefore=dbCap.prepare('SELECT * FROM verification_usage WHERE workspace_id=? AND usage_day=?').get(ownerA.workspace.id,day);
+    dbCap.prepare('INSERT INTO verification_usage(workspace_id,usage_day,jobs,characters) VALUES(?,?,0,?) ON CONFLICT(workspace_id,usage_day) DO UPDATE SET characters=excluded.characters').run(ownerA.workspace.id,day,cap);
+    dbCap.close();
+    const earlierResults=store.getReview(ownerA.workspace.id,'review-retrieval').claimResults;
+    geminiCalls=0;
+    const capped=await write('/api/verification/check/review-retrieval?wait=true',jarA,csrfA,'POST');
+    assert.equal(capped.status,502);
+    assert.equal(geminiCalls,0,`character cap is checked before sending content to Gemini; calls=${geminiCalls}, cap=${cap}`);
+    assert.match(capped.data.error,/temporarily unavailable/i,JSON.stringify({error:capped.data.error,job:capped.data.job}));
+    assert.deepEqual(store.getReview(ownerA.workspace.id,'review-retrieval').claimResults,earlierResults,'failed cap check preserves earlier findings');
+    assert.ok(store.listAuditEvents(ownerA.workspace.id).some((event)=>event.action==='verification.cap_hit'&&event.details.cap==='daily_characters'));
+    const dbRestore=new DatabaseSync(process.env.CLEARED_DB_PATH);
+    if(usageBefore)dbRestore.prepare('UPDATE verification_usage SET jobs=?,characters=? WHERE workspace_id=? AND usage_day=?').run(usageBefore.jobs,usageBefore.characters,ownerA.workspace.id,day);
+    else dbRestore.prepare('DELETE FROM verification_usage WHERE workspace_id=? AND usage_day=?').run(ownerA.workspace.id,day);
+    dbRestore.close();
   } finally { delete process.env.GEMINI_API_KEY; globalThis.fetch = originalFetch; }
   const { scanUpload } = await import('../src/services/file-scanner.js');
   await assert.rejects(scanUpload(Buffer.from('clean'), { NODE_ENV: 'production', FILE_SCANNER: 'none' }), /cannot mark.*clean/i);

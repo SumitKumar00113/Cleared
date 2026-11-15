@@ -1,3 +1,4 @@
+import '../env.js';
 import { randomUUID, randomBytes, scrypt, timingSafeEqual, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { mkdirSync } from 'node:fs';
@@ -176,7 +177,10 @@ const jobColumns=new Set(db.prepare('PRAGMA table_info(verification_jobs)').all(
 if(!jobColumns.has('available_at'))db.exec('ALTER TABLE verification_jobs ADD COLUMN available_at TEXT');
 db.prepare('INSERT OR IGNORE INTO workspace_settings(workspace_id,ai_check_enabled) SELECT id,0 FROM workspaces').run();
 // Recover jobs interrupted during a process shutdown. They can be claimed again.
-db.prepare("UPDATE verification_jobs SET status='queued',started_at=NULL WHERE status='running'").run();
+export function recoverInterruptedVerificationJobs() {
+  return db.prepare("UPDATE verification_jobs SET status='queued',started_at=NULL WHERE status='running'").run().changes;
+}
+recoverInterruptedVerificationJobs();
 
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);

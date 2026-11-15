@@ -1,3 +1,4 @@
+import '../env.js';
 import { createHash, createHmac } from 'node:crypto';
 import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import path from 'node:path';

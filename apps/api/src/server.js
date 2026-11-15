@@ -1,6 +1,6 @@
+import './env.js';
 import express from 'express';
 import cors from 'cors';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { reviewsRouter } from './services/reviews.js';
@@ -12,15 +12,6 @@ import { workspaceRouter } from './services/workspace.js';
 import { filesRouter } from './services/files.js';
 import { encryptionKey } from './services/mfa.js';
 import { recordAuditEvent } from './services/store.js';
-
-const rootEnv = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../.env');
-try {
-  const envText = await readFile(rootEnv, 'utf8');
-  for (const line of envText.split(/\r?\n/)) {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (match && process.env[match[1]] === undefined) process.env[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2');
-  }
-} catch { /* Environment variables may be supplied by the host instead. */ }
 
 export function validateEnvironment(env = process.env) {
   if (env.NODE_ENV === 'production') {

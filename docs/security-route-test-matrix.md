@@ -25,7 +25,7 @@ Cross-workspace tests use two separately created workspaces and exercise foreign
 | `POST /api/auth/logout` | `sign out everywhere...`; `MFA challenges reject...` |
 | `POST /api/auth/logout-everywhere` | `sign out everywhere revokes every session for the account` |
 | `GET /api/workspace` | `every workspace API family keeps cross-workspace identifiers isolated` |
-| `PATCH /api/workspace/ai` | Workspace AI consent is workspace scoped; non-owner/administrator roles are denied; recent authentication and CSRF are required. |
+| `PATCH /api/workspace/ai` | `workspace AI checking defaults off and only owners or administrators can change it` (default off, reviewer denied, owner changes are audited; recent auth and CSRF required) |
 | `GET /api/workspace/members` | `every workspace API family keeps cross-workspace identifiers isolated` (foreign member is absent) |
 | `POST /api/workspace/invitations` | `every workspace API family keeps cross-workspace identifiers isolated`; `workspace invites create members...` (invitation is created only in caller workspace) |
 | `PATCH /api/workspace/members/:userId` | `every workspace API family...`; `membership role changes and removals revoke...` |
@@ -42,13 +42,13 @@ Cross-workspace tests use two separately created workspaces and exercise foreign
 | `PUT /api/sources/collections/:category/access` | `collection access policies deny unlisted members...`; `review history and audit list/export remain isolated across workspaces` (foreign user ID rejected) |
 | `DELETE /api/sources/:id` | `every workspace API family keeps cross-workspace identifiers isolated` (foreign source is 404) |
 | `POST /api/verification/check/:reviewId` | `every workspace API family keeps cross-workspace identifiers isolated` (foreign review is 404) |
-| `GET /api/verification/jobs/:jobId` | Verification job lookup is workspace scoped; foreign job IDs return 404. |
+| `GET /api/verification/jobs/:jobId` | `verification jobs are idempotent for an active revision and hidden across workspaces` (workspace B's authenticated session receives 404 for workspace A's job ID) |
 | `POST /api/files/:fileId/link` | `private source downloads are workspace and user bound...`; `review history and audit list/export remain isolated...` (foreign file is 404); `bad text...` (quarantine denies links) |
 | `GET /api/files/:fileId/download` | `private source downloads are workspace and user bound...`; `review history and audit list/export remain isolated...` (cross-workspace signed link, tampered/expired token, nosniff, quarantine recheck) |
 | `POST /api/files/:fileId/scan` | `review history and audit list/export remain isolated...` (foreign file is 404); `bad text...` exercises scanner refusal; route also requires manager role and recent auth |
 | `GET /api/workspace/audit` | `review history and audit list/export remain isolated across workspaces` (workspace B cannot list A events) |
 | `GET /api/workspace/audit/export` | `review history and audit list/export remain isolated across workspaces` (workspace B export contains no A identifiers) |
-| `GET /api/workspace/audit/integrity` | Owner/administrator-only integrity report uses the authenticated workspace ID; chain tampering and interior deletion are tested by `per-workspace audit hash chain detects edited events and removed interior events`. |
+| `GET /api/workspace/audit/integrity` | Owner/administrator-only integrity report uses the authenticated workspace ID; chain tampering and interior deletion are tested by `per-workspace audit hash chain detects edited events and removed interior events`; reviewer denial is asserted by `workspace AI checking defaults off and only owners or administrators can change it`. |
 | `GET /api/notifications` | `notifications are isolated by workspace and recipient for listing and marking read` (workspace B cannot see A notifications; workspace A owner cannot see member A's notifications) |
 | `PATCH /api/notifications/:id/read` | `notifications are isolated by workspace and recipient for listing and marking read` (owner cannot mark same-workspace member notification; foreign-workspace notification returns 404; recipient can mark own notification) |
 

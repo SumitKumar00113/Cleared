@@ -17,6 +17,14 @@ test('deterministic evaluation set meets its minimum accuracy threshold',()=>{
   });
   const correct=outcomes.filter((item)=>item.expected===item.actual).length;
   assert.ok(correct/fixtures.length>=0.9,JSON.stringify(outcomes.filter((item)=>item.expected!==item.actual)));
+  assert.ok(fixtures.filter((fixture)=>fixture.categories?.includes('prompt_injection')).length>=10,'the fixed evaluation set retains at least ten prompt-injection fixtures');
+});
+
+test('held-out evaluation has at least fifteen separate cases and never enters the fixed threshold set',async()=>{
+  const heldout=JSON.parse(await readFile(path.join(here,'../eval/heldout/v1.json'),'utf8'));
+  assert.ok(heldout.length>=15);
+  const ids=new Set(fixtures.map((fixture)=>fixture.id));
+  assert.ok(heldout.every((fixture)=>!ids.has(fixture.id)));
 });
 
 test('deterministic numeric contradiction cannot be upgraded by an AI Supported result',()=>{

@@ -563,6 +563,7 @@ test('workspace AI checking defaults off and only owners or administrators can c
   const memberCsrfResult=await get('/api/auth/csrf',memberJar);
   const forbidden=await write('/api/workspace/ai',memberCsrfResult.jar,memberCsrfResult.data.token,'PATCH',JSON.stringify({enabled:true}),{'Content-Type':'application/json'});
   assert.equal(forbidden.status,403);
+  assert.equal((await get('/api/workspace/audit/integrity',memberCsrfResult.jar)).status,403,'integrity report is restricted to owners and administrators');
   const enabled=await write('/api/workspace/ai',jarA,csrfA,'PATCH',JSON.stringify({enabled:true}),{'Content-Type':'application/json'});
   assert.equal(enabled.status,200);
   assert.equal(store.getWorkspaceAIEnabled(ownerA.workspace.id),true);

@@ -400,6 +400,8 @@ AI checking defaults off for every workspace. With it off, only deterministic ch
 
 ## Tests and builds
 
+Run `npm run eval --workspace @cleared/api` for the fixed invented evaluation set. It reports case counts by category and a confusion matrix. The initial held-out set under `apps/api/eval/heldout/` is separate from the build threshold; run it with `npm run eval --workspace @cleared/api -- --heldout`. Held-out mode is deterministic only and does not send text to Gemini. Keep all evaluation data invented; do not add customer text or secrets.
+
 The API suite uses Node's built-in test runner. The default API command runs `apps/api/test/*.test.js`, covering security/auth, MFA, workspace isolation, review history, files/sources, and workspace access:
 
 ```bash
@@ -430,6 +432,7 @@ This MVP is intentionally compact, but several things are still not implemented 
 - no production-ready SSO is implemented
 - deterministic verification uses conservative number, date, currency, percentage and named-term checks; it does not replace expert review of nuanced claims
 - Gemini billing confirmation is an operator attestation and cannot verify the account's billing state; prompt delimiters and strict output checks reduce injection risk but are not a comprehensive defense
+- The fixed deterministic evaluation set is small and synthetic. The separate held-out set is not a production quality guarantee and is not used to tune or gate the build.
 - legacy reviews have migrated revision/submission data but do not have reconstructed historical decisions
 - solo workspaces cannot approve their own submissions because separation of duties requires a different user
 - suggested corrections are not persisted as correction records; editing the draft itself does create a revision

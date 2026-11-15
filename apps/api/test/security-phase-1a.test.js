@@ -23,6 +23,7 @@ before(async () => {
   process.env.FILE_SCANNER = 'none';
   process.env.LOCAL_STORAGE_DIR = path.join(directory, 'private-files');
   store = await import('../src/services/store.js');
+  assert.deepEqual(store.sqliteRuntimeSettings(), { foreignKeys: true, journalMode: 'wal', synchronous: 1, busyTimeoutMs: 5000 });
   mfa = await import('../src/services/mfa.js');
   mailer = await import('../src/services/mailer.js');
   ({ createApp: app } = await import('../src/server.js'));
@@ -143,17 +144,33 @@ test('CORS accepts configured development origin and rejects other origins', asy
   const allowed = await request('/api/health', { headers: { Origin: 'http://localhost:5173' } });
   const denied = await request('/api/health', { headers: { Origin: 'https://attacker.example' } });
   assert.equal(allowed.headers.get('access-control-allow-origin'), 'http://localhost:5173');
+  assert.equal(allowed.headers.get('access-control-allow-credentials'), 'true');
   assert.equal(denied.headers.get('access-control-allow-origin'), null);
 });
 
 test('production startup rejects weak secrets and non-HTTPS wildcard origins', async () => {
   const { validateEnvironment } = await import('../src/server.js');
-  const valid = { NODE_ENV: 'production', SESSION_SECRET: 'strong-random-secret-that-is-over-thirty-two-characters', CORS_ORIGINS: 'https://app.example', APP_BASE_URL: 'https://app.example', SMTP_HOST: 'smtp.example', SMTP_PORT: '587', SMTP_USER: 'sender', SMTP_PASS: 'mail-secret', MAIL_FROM: 'noreply@example.com', MFA_ENCRYPTION_KEY: '22'.repeat(32), FILE_STORAGE: 's3', S3_ENDPOINT: 'https://s3.example', S3_BUCKET: 'private-files', S3_ACCESS_KEY_ID: 'access', S3_SECRET_ACCESS_KEY: 'secret' };
+  const valid = { NODE_ENV: 'production', SESSION_SECRET: 'strong-random-secret-that-is-over-thirty-two-characters', CORS_ORIGINS: 'https://app.example', APP_BASE_URL: 'https://app.example', SMTP_HOST: 'smtp.example', SMTP_PORT: '587', SMTP_USER: 'sender', SMTP_PASS: 'mail-secret', MAIL_FROM: 'noreply@example.com', MFA_ENCRYPTION_KEY: '22'.repeat(32), FILE_STORAGE: 's3', S3_ENDPOINT: 'https://s3.example', S3_BUCKET: 'private-files', S3_ACCESS_KEY_ID: 'access', S3_SECRET_ACCESS_KEY: 'secret', FILE_SCANNER: 'clamav', CLAMAV_HOST: 'clamav.internal', CLAMAV_PORT: '3310' };
   assert.throws(() => validateEnvironment({ ...valid, SESSION_SECRET: 'weak' }), /strong SESSION_SECRET/);
   assert.throws(() => validateEnvironment({ ...valid, CORS_ORIGINS: '*' }), /exact origin/);
   assert.throws(() => validateEnvironment({ ...valid, CORS_ORIGINS: 'http://app.example' }), /HTTPS/);
+  assert.throws(() => validateEnvironment({ ...valid, APP_BASE_URL: 'https://app.example/path' }), /exact HTTPS origin/);
   assert.throws(() => validateEnvironment({ ...valid, S3_ENDPOINT: 'http://s3.example' }), /HTTPS S3_ENDPOINT/);
+  assert.throws(() => validateEnvironment({ ...valid, FILE_SCANNER: 'none' }), /FILE_SCANNER=clamav/);
+  assert.throws(() => validateEnvironment({ ...valid, CLAMAV_HOST: '' }), /CLAMAV_HOST/);
   assert.equal(validateEnvironment(valid), true);
+});
+
+test('production Express app trusts the single Render proxy hop', async () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+    const { createApp } = await import('../src/server.js');
+    assert.equal(createApp().get('trust proxy'), 1);
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+  }
 });
 
 test('password checks reject common password patterns and persist OWASP scrypt parameters', async () => {
@@ -453,12 +470,17 @@ test('production session cookies use the __Host- prefix with Secure and Path=/',
   const previousMode = process.env.NODE_ENV; process.env.NODE_ENV = 'production';
   try {
     const csrf = await get('/api/auth/csrf');
+    const csrfCookie = csrf.headers.getSetCookie().find((item) => item.startsWith('cleared_csrf='));
+    assert.ok(csrfCookie);
+    assert.match(csrfCookie, /; Secure/);
+    assert.match(csrfCookie, /SameSite=Strict/);
     const response = await write('/api/auth/login', csrf.jar, csrf.data.token, 'POST', JSON.stringify({ email: 'owner-a@test.example', password: 'LongAndUniquePassword_A!2026', workspaceId: ownerA.workspace.id }), { 'Content-Type': 'application/json' });
     assert.equal(response.status, 200);
     const setCookies = response.headers.getSetCookie();
     const sessionCookie = setCookies.find((item) => item.startsWith('__Host-cleared_session='));
     assert.ok(sessionCookie);
     assert.match(sessionCookie, /; Secure/);
+    assert.match(sessionCookie, /SameSite=Lax/);
     assert.match(sessionCookie, /Path=\//);
     assert.doesNotMatch(sessionCookie, /Domain=/i);
   } finally { process.env.NODE_ENV = previousMode; }

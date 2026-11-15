@@ -53,8 +53,8 @@ function WorkspaceApp({ user }) {
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/reviews').then((response) => response.ok ? response.json() : Promise.reject()),
-      fetch('/api/sources').then((response) => response.ok ? response.json() : Promise.reject()),
+      apiFetch('/api/reviews').then((response) => response.ok ? response.json() : Promise.reject()),
+      apiFetch('/api/sources').then((response) => response.ok ? response.json() : Promise.reject()),
     ]).then(([reviewResult, sourceResult]) => {
       setReviews(reviewResult.data || []);
       setSources(sourceResult.data || []);
@@ -65,12 +65,12 @@ function WorkspaceApp({ user }) {
     });
   }, []);
 
-  useEffect(()=>{fetch('/api/workspace').then((response)=>response.ok?response.json():null).then((result)=>{if(result?.data)setAiCheckEnabled(Boolean(result.data.aiCheckEnabled));}).catch(()=>{});},[]);
+  useEffect(()=>{apiFetch('/api/workspace').then((response)=>response.ok?response.json():null).then((result)=>{if(result?.data)setAiCheckEnabled(Boolean(result.data.aiCheckEnabled));}).catch(()=>{});},[]);
 
   useEffect(() => {
     if (!canViewAudit) return undefined;
     let active = true;
-    fetch('/api/workspace/audit?limit=8').then(async (response) => {
+    apiFetch('/api/workspace/audit?limit=8').then(async (response) => {
       if (!response.ok) throw new Error('Activity unavailable');
       const body = await response.json();
       if (active) setAuditEvents(body.data || []);
@@ -149,7 +149,7 @@ function WorkspaceApp({ user }) {
       while(Date.now()-started<120000) {
         setVerificationState(job.status==='running'?'checking':'queued');
         await new Promise((resolve)=>setTimeout(resolve,700));
-        const poll=await fetch(`/api/verification/jobs/${encodeURIComponent(job.id)}`);
+        const poll=await apiFetch(`/api/verification/jobs/${encodeURIComponent(job.id)}`);
         const body=await poll.json();if(!poll.ok)throw new Error(body.error||'Could not read verification status.');
         job=body.data.job;
         if(job.status==='succeeded') {
@@ -314,7 +314,7 @@ function App() { return <AuthGate />; }
 
 function AuthGate() {
   const [state, setState] = useState('loading'); const [user, setUser] = useState(null); const [configError, setConfigError] = useState('');
-  useEffect(() => { fetch('/api/auth/session').then(async (response) => { const data = await response.json(); if (response.status === 503) throw new Error(data.error); if (!response.ok) throw new Error('Authentication service unavailable.'); return data; }).then((data) => { setUser(data.user); setState(data.authenticated ? 'signed-in' : 'signed-out'); }).catch((error) => { setConfigError(error.message); setState('setup'); }); }, []);
+  useEffect(() => { apiFetch('/api/auth/session').then(async (response) => { const data = await response.json(); if (response.status === 503) throw new Error(data.error); if (!response.ok) throw new Error('Authentication service unavailable.'); return data; }).then((data) => { setUser(data.user); setState(data.authenticated ? 'signed-in' : 'signed-out'); }).catch((error) => { setConfigError(error.message); setState('setup'); }); }, []);
   const onLogin = (nextUser) => { window.history.replaceState(null, '', '/'); setUser(nextUser); setState('signed-in'); };
   if (state === 'loading') return <div className="auth-screen"><p>Checking sign-in…</p></div>;
   if (window.location.pathname === '/join') return <JoinPage onLogin={onLogin} />;
@@ -337,7 +337,7 @@ function LoginPage({ onLogin, configError }) {
   const [creating, setCreating] = useState(() => new URLSearchParams(window.location.search).get('mode') === 'create'); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const [challenge,setChallenge]=useState(null);
   async function submit(event) { event.preventDefault(); setBusy(true); setError(''); const form = new FormData(event.currentTarget); const endpoint = creating ? '/api/auth/workspaces' : '/api/auth/login'; const payload = creating ? { workspaceName: form.get('workspaceName'), email: form.get('email'), password: form.get('password') } : { email: form.get('email'), workspaceId: form.get('workspaceId'), password: form.get('password') }; try { const response = await apiFetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not continue.'); if (data.verificationRequired) { setError('Verify your email before signing in.'); return; } if (data.mfaRequired) { setChallenge(data); return; } onLogin(data.user); } catch (cause) { setError(cause.message || 'Could not continue.'); } finally { setBusy(false); } }
-  async function submitMfa(event){event.preventDefault();setBusy(true);setError('');const f=new FormData(event.currentTarget);const csrfResponse=await fetch('/api/auth/csrf');const csrf=await csrfResponse.json();const r=await fetch('/api/auth/mfa/challenge',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf.token},body:JSON.stringify({email:challenge.email,challengeToken:challenge.challengeToken,code:f.get('code'),recoveryCode:f.get('recoveryCode')})});const d=await r.json();setBusy(false);if(!r.ok){setError(d.error||'Could not verify this code.');return;}onLogin(d.user);}
+  async function submitMfa(event){event.preventDefault();setBusy(true);setError('');const f=new FormData(event.currentTarget);const csrfResponse=await apiFetch('/api/auth/csrf');const csrf=await csrfResponse.json();const r=await apiFetch('/api/auth/mfa/challenge',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf.token},body:JSON.stringify({email:challenge.email,challengeToken:challenge.challengeToken,code:f.get('code'),recoveryCode:f.get('recoveryCode')})});const d=await r.json();setBusy(false);if(!r.ok){setError(d.error||'Could not verify this code.');return;}onLogin(d.user);}
   if(challenge)return <main className="auth-screen"><section className="auth-card"><a className="auth-brand" href="/">Cleared<span>.</span></a><h1>Verify your identity</h1><p>Enter a current authenticator code or a one-time recovery code.</p><form onSubmit={submitMfa}><label>Authenticator code<input name="code" inputMode="numeric" autoComplete="one-time-code"/></label><label>Recovery code<input name="recoveryCode" autoComplete="off"/></label>{error&&<p className="auth-error" role="alert">{error}</p>}<button className="button button-primary" disabled={busy}>Verify and sign in</button></form><button className="auth-switch" onClick={()=>setChallenge(null)}>Back to sign in</button></section></main>;
   return <main className="auth-screen"><section className="auth-card"><a className="auth-brand" href="/">Cleared<span>.</span></a><h1>{creating ? 'Create a company workspace' : 'Sign in to your workspace'}</h1><p>{creating ? 'Your company gets a workspace ID. You become its first owner and can invite employees.' : 'Use your company workspace ID and your personal employee account.'}</p>{configError && <div className="auth-error" role="alert">{configError}</div>}{!configError && <form onSubmit={submit}>{creating && <label>Company or workspace name<input name="workspaceName" autoComplete="organization" required minLength="2"/></label>}<label>Email address<input name="email" type="email" autoComplete="email" required/></label>{!creating && <label>Company workspace ID<input name="workspaceId" autoComplete="off" required/></label>}<label>Password<input name="password" type="password" autoComplete={creating ? 'new-password' : 'current-password'} required minLength={creating ? 12 : undefined}/></label>{error && <p className="auth-error" role="alert">{error}</p>}<button className="button button-primary" disabled={busy}>{busy ? 'Please wait…' : creating ? 'Create workspace' : 'Sign in'}</button></form>}{!configError && !creating && <a className="auth-switch" href="/forgot-password">Forgot your password or need to set one?</a>}{!configError && <button className="auth-switch" type="button" onClick={() => { setCreating(!creating); setError(''); }}>{creating ? 'Already have an account? Sign in' : 'Create a company workspace'}</button>}</section></main>;
 }
@@ -360,7 +360,7 @@ function AccountActionPage({ kind }) {
 function VerificationPendingPage({user,onVerified}) {
   const [message,setMessage]=useState(''); const [error,setError]=useState('');
   async function resend(){const r=await apiFetch('/api/auth/email/resend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:user.email})});const d=await r.json();setMessage(d.message||'If verification is needed, an email has been sent.');}
-  async function check(){const r=await fetch('/api/auth/session');const d=await r.json();if(d.authenticated&&d.user.emailVerified)onVerified(d.user);else setMessage('Your email is not verified yet. Open the link from your email and check again.');}
+  async function check(){const r=await apiFetch('/api/auth/session');const d=await r.json();if(d.authenticated&&d.user.emailVerified)onVerified(d.user);else setMessage('Your email is not verified yet. Open the link from your email and check again.');}
   return <main className="auth-screen"><section className="auth-card"><a className="auth-brand" href="/">Cleared<span>.</span></a><h1>Verify your email</h1><p>We sent a verification link to {user.email}. Verify the address before opening workspace data.</p>{error&&<p className="auth-error" role="alert">{error}</p>}{message&&<p role="status">{message}</p>}<button className="button button-primary" onClick={()=>resend().catch(e=>setError(e.message))}>Resend verification email</button><button className="auth-switch" onClick={check}>I’ve verified my email</button><button className="auth-switch" onClick={()=>apiFetch('/api/auth/logout',{method:'POST'}).then(()=>window.location.assign('/'))}>Sign out</button></section></main>;
 }
 

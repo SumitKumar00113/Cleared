@@ -16,11 +16,11 @@ export default function WorkspaceSettings({ user, onAISettingChanged = () => {} 
   const canManage = ['owner', 'administrator'].includes(user.role);
 
   async function load() {
-    const response = await fetch('/api/workspace'); const result = await response.json();
+    const response = await apiFetch('/api/workspace'); const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Could not load workspace.');
     setWorkspace(result.data);
     if (canManage) {
-      const membersResponse = await fetch('/api/workspace/members'); const membersResult = await membersResponse.json();
+      const membersResponse = await apiFetch('/api/workspace/members'); const membersResult = await membersResponse.json();
       if (!membersResponse.ok) throw new Error(membersResult.error || 'Could not load members.');
       setMembers(membersResult.data || []);
     }
@@ -75,7 +75,7 @@ export default function WorkspaceSettings({ user, onAISettingChanged = () => {} 
 
 function AccountSecurityPanel({user,setError,setNotice}) {
   const [sessions,setSessions]=useState([]); const [busy,setBusy]=useState(false); const [mfaSetup,setMfaSetup]=useState(null); const [recovery,setRecovery]=useState(null); const [mfaEnabled,setMfaEnabled]=useState(user.mfaEnabled);
-  async function load(){const r=await fetch('/api/auth/sessions');const d=await r.json();if(!r.ok)throw Error(d.error||'Could not load sessions.');setSessions(d.data||[]);}
+  async function load(){const r=await apiFetch('/api/auth/sessions');const d=await r.json();if(!r.ok)throw Error(d.error||'Could not load sessions.');setSessions(d.data||[]);}
   useEffect(()=>{load().catch(e=>setError(e.message));},[]);
   async function verifyEmail(){const r=await apiFetch('/api/auth/email/resend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:user.email})});setNotice(r.ok?'If your address needs verification, a message has been sent.':'Could not send a verification message.');}
   async function changeEmail(event){event.preventDefault();setBusy(true);const formElement=event.currentTarget;const f=new FormData(formElement);const r=await apiFetch('/api/auth/email/change',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({currentPassword:f.get('password'),newEmail:f.get('email')})});const d=await r.json();setBusy(false);if(!r.ok){setError(d.error||'Could not request email change.');return;}formElement.reset();setNotice(d.message);}

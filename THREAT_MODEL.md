@@ -17,7 +17,7 @@
 
 - Sign-up, sign-in, invitation acceptance, password recovery, email verification, MFA, and session endpoints.
 - Workspace membership and role management, review APIs and immutable revisions, source uploads and downloads, audit exports, and verification jobs.
-- Supabase Auth/PostgREST/Storage policies and the malware scanner callback.
+- The malware scanner TCP endpoint and configured SMTP, S3-compatible storage, and Gemini provider integrations.
 
 ## Top risks and intended controls
 
@@ -31,7 +31,7 @@
 | Session theft or fixation | Random 256-bit cookie IDs rotated at login, SHA-256 hashed IDs at rest, expiry and revocation, revoke-everywhere, `HttpOnly`, `SameSite=Lax`, production `__Host-` + `Secure` |
 | Cross-site request forgery | SameSite=Strict CSRF cookie paired with an `X-CSRF-Token` header on unsafe methods; CSP and exact CORS origin allow-list |
 | Password guessing | Async bounded scrypt (N=2^17, r=8, p=1), 12-character minimum, common-password denylist, account+IP progressive lockout and persistent IP request limits |
-| Unsafe document content reaches extraction | Isolated worker, minimal permissions, temporary-file cleanup, retry-safe jobs, scanner gate |
+| Unsafe document content reaches extraction | UTF-8 text validation, upload size/type restrictions, ClamAV scan gate, quarantine on scanner error, retry-safe verification jobs |
 
 ## Important limits
 
@@ -41,4 +41,4 @@ Action tokens and throttles are stored in SQLite; throttling survives process re
 
 Verification uses workspace AI consent, relevant source passages, deterministic checks, strict server-side model output validation, and database-backed jobs with caps. Draft and source text are untrusted input; random delimiters and system instructions reduce prompt-injection risk but do not eliminate it. Model output only contributes candidate findings and cannot write review decisions or status. Cost abuse is limited with per-workspace rate and daily job/character caps; operators should monitor cap events and provider billing. The in-process worker is not a distributed queue and SQLite deployment remains single-instance.
 
-The API remains Express + SQLite. The Supabase/PostgreSQL scaffold is inactive and retained as a planning reference; it has not been kept in schema parity with this runtime. Before a managed PostgreSQL move, add row-level policies to each workspace-owned table and child table, derive tenant context from verified membership, and test context isolation with pooled connections. SQLite backups are created before the schema conversion; rollback archives the Phase 3 schema and restores the Phase 2 API tables. MinIO/ClamAV integration tests are supplied but the external services were unavailable in the development environment. Independent security review, penetration testing, and backup/restore validation remain outstanding. This document is not a certification or independent security assessment. No compliance certification is claimed.
+The API remains Express + SQLite. The Supabase/PostgreSQL scaffold is inactive and retained as a planning reference; it has not been kept in schema parity with this runtime. Before a managed PostgreSQL move, add row-level policies to each workspace-owned table and child table, derive tenant context from verified membership, and test context isolation with pooled connections. Startup schema conversions create SQLite snapshots; `npm run db:backup` creates a SQLite-safe snapshot and validates it. Off-disk scheduled backups and a production restore drill remain outstanding. MinIO/ClamAV integration tests are supplied and should be run before deployment. Independent security review and penetration testing remain outstanding. This document is not a certification or independent security assessment. No compliance certification is claimed.

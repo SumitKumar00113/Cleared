@@ -1,17 +1,17 @@
-{
-  "name": "cleared-platform",
-  "version": "0.1.0",
-  "private": true,
-  "engines": { "node": "24.19.0" },
-  "workspaces": ["apps/web", "apps/api"],
-  "scripts": {
-    "dev": "concurrently -k -n api,web -c green,cyan \"npm run dev:api\" \"npm run dev:web\"",
-    "dev:web": "npm run dev --workspace @cleared/web",
-    "dev:api": "npm run dev --workspace @cleared/api",
-    "build": "npm run build --workspace @cleared/web",
-    "start": "npm run start --workspace @cleared/api"
-  },
-  "devDependencies": {
-    "concurrently": "^9.1.2"
+  {
+    "name": "cleared-platform",
+    "version": "0.1.0",
+    "private": true,
+    "engines": { "node": "24.19.0" },
+    "workspaces": ["apps/web", "apps/api"],
+    "scripts": {
+      "dev": "concurrently -k -n api,web -c green,cyan \"npm run dev:api\" \"npm run dev:web\"",
+      "dev:web": "npm run dev --workspace @cleared/web",
+      "dev:api": "npm run dev --workspace @cleared/api",
+      "build": "npm run build --workspace @cleared/web",
+      "start": "npm run start --workspace @cleared/api"
+    },
+    "devDependencies": {
+      "concurrently": "^9.1.2"
+    }
   }
-}

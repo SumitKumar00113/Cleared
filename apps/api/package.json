@@ -13,6 +13,7 @@
     "test:integration": "node --test test/integration/phase2-services.test.js",
     "db:up": "node scripts/migrate-phase3.js up",
     "db:down": "node scripts/migrate-phase3.js down",
+    "db:backup": "node scripts/backup-sqlite.js",
     "audit:chain:up": "node scripts/audit-chain.js up",
     "audit:chain:down": "node scripts/audit-chain.js down",
     "audit:verify": "node scripts/audit-chain.js verify",

@@ -33,7 +33,18 @@ async function withScryptSlot(operation) {
   finally { activeScrypt -= 1; scryptQueue.shift()?.(); }
 }
 export function passwordHashingStats() { return { active: activeScrypt, queued: scryptQueue.length, peak: peakActiveScrypt, concurrencyLimit: SCRYPT_CONCURRENCY, maxmemBytes: SCRYPT_MAXMEM }; }
+export function sqliteRuntimeSettings() {
+  return {
+    foreignKeys: db.prepare('PRAGMA foreign_keys').get().foreign_keys === 1,
+    journalMode: db.prepare('PRAGMA journal_mode').get().journal_mode,
+    synchronous: db.prepare('PRAGMA synchronous').get().synchronous,
+    busyTimeoutMs: db.prepare('PRAGMA busy_timeout').get().timeout,
+  };
+}
 db.exec(`PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA busy_timeout = 5000;
 CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, created_at TEXT NOT NULL, email_verified INTEGER NOT NULL DEFAULT 0, mfa_secret_enc TEXT, mfa_pending_secret_enc TEXT, mfa_enabled INTEGER NOT NULL DEFAULT 0, mfa_last_step INTEGER NOT NULL DEFAULT -1);
 CREATE TABLE IF NOT EXISTS memberships (workspace_id TEXT NOT NULL REFERENCES workspaces(id), user_id TEXT NOT NULL REFERENCES users(id), role TEXT NOT NULL, PRIMARY KEY (workspace_id, user_id));

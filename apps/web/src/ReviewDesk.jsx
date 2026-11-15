@@ -1,6 +1,6 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { gsap } from 'gsap';
-import { apiFetchRecent } from './api.js';
+import { apiFetch, apiFetchRecent } from './api.js';
 import { ArrowRight, Bell, Check, Clock3, FileText, FolderOpen, Search, ShieldCheck, Sparkles, X } from 'lucide-react';
 import './review-desk.css';
 
@@ -35,10 +35,10 @@ export default function ReviewDesk() {
     document.title = 'Cleared: Review desk';
     let active = true;
     Promise.all([
-      fetch('/api/reviews').then((response) => { if (!response.ok) throw new Error('Could not load reviews.'); return response.json(); }),
-      fetch('/api/sources').then((response) => { if (!response.ok) throw new Error('Could not load sources.'); return response.json(); }),
-      fetch('/api/auth/session').then((response) => response.json()),
-      fetch('/api/notifications').then((response) => { if (!response.ok) throw new Error('Could not load notifications.'); return response.json(); }),
+      apiFetch('/api/reviews').then((response) => { if (!response.ok) throw new Error('Could not load reviews.'); return response.json(); }),
+      apiFetch('/api/sources').then((response) => { if (!response.ok) throw new Error('Could not load sources.'); return response.json(); }),
+      apiFetch('/api/auth/session').then((response) => response.json()),
+      apiFetch('/api/notifications').then((response) => { if (!response.ok) throw new Error('Could not load notifications.'); return response.json(); }),
     ]).then(([reviewResult, sourceResult, sessionResult, notificationResult]) => {
       if (!active) return;
       setReviews(reviewResult.data || []);

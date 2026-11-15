@@ -1,5 +1,8 @@
 const path = require('node:path');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
+const webpack = require('webpack');
+
+const apiHost = process.env.CLEARED_API_HOST || '';
 
 module.exports = {
   entry: './src/main.jsx',
@@ -23,7 +26,12 @@ module.exports = {
       { test: /\.css$/i, use: ['style-loader', 'css-loader'] },
     ],
   },
-  plugins: [new HtmlWebpackPlugin({ template: './index.html' })],
+  plugins: [
+    new HtmlWebpackPlugin({ template: './index.html' }),
+    new webpack.DefinePlugin({
+      'process.env.CLEARED_API_HOST': JSON.stringify(apiHost),
+    }),
+  ],
   devServer: {
     host: '0.0.0.0',
     port: Number(process.env.WEB_PORT || 5173),

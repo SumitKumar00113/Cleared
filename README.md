@@ -230,6 +230,7 @@ Copy `.env.example` to `.env` and customize it for your environment.
 | `VERIFICATION_DAILY_CHAR_CAP` | Optional | Per-workspace daily cap for characters sent to Gemini; defaults to `1,000,000`. |
 | `VERIFICATION_MAX_RETRIEVED_CHARS` | Optional | Maximum combined retrieved passage text per job; defaults to `80,000`. |
 | `CLEARED_DB_PATH` | Optional | Custom SQLite file path |
+| `CLEARED_API_HOST` | Render frontend build | API host name used to send browser requests to the separately deployed API service. Do not include a path; the frontend uses HTTPS. |
 
 Notes:
 - Use Node `24.19.x` (also declared in `package.json` engines).
@@ -239,6 +240,59 @@ Notes:
 - Unsafe requests require a CSRF cookie/header pair. API responses include CSP, MIME sniffing and frame protections, and Referrer-Policy; HSTS is enabled in production.
 - AI checking is disabled per workspace by default. With AI off, no draft or source text is sent to Gemini.
 - Gemini startup warns unless an operator sets `GEMINI_PAID_TIER_CONFIRMED=true`; this is an operator attestation, not a provider-side billing check.
+
+## Render deployment
+
+`render.yaml` defines a Render Node web service for `apps/api` and a Render static site for `apps/web`. Both use Node `24.19.0` and repository-root builds. The API uses `npm install` and `npm run start --workspace @cleared/api`, has a `/var/data` persistent disk, and stores SQLite at `/var/data/cleared.sqlite`. The static site builds with `npm install && npm run build` and publishes `apps/web/dist`. Its `CLEARED_API_HOST` build variable is linked to the API service's public Render hostname; browser requests use HTTPS, CORS credentials, and the configured API origin.
+
+The API disk is single-instance storage. Keep the API at one instance and do not attach a second service to its disk. SQLite enables WAL, `synchronous=NORMAL`, foreign keys, and a 5-second busy timeout; transactions that change schema/data use SQLite transactions where implemented. WAL supports concurrent readers and serializes writes, but this setup is for a single API process and is not a multi-instance database. Render mounts persistent disks at runtime, not during build or pre-deploy commands, so do not run database migrations in the build or pre-deploy phase.
+
+### Render service settings
+
+The Blueprint supplies the root directory, build and start commands, `apps/web/dist` publish path, `/api/health` health check, Node version, API disk mount, frontend API-host link, SPA rewrite, and static response security headers. Create/sync the Blueprint, then set the API service's `APP_BASE_URL` to the HTTPS frontend URL and `CORS_ORIGINS` to that exact HTTPS origin (no path or trailing slash). Keep one instance for SQLite. For browser cookie compatibility, use custom frontend and API domains under the same registrable domain (for example, `app.example.com` and `api.example.com`); the app and API must both be HTTPS. The default `*.onrender.com` app and API hosts are different sites for cookie purposes, so use a custom API domain and override the static site's `CLEARED_API_HOST` with that domain before relying on sign-in. Also update the Static Site CSP `connect-src` header in Render to allow the exact API origin. The Blueprint's CSP currently allows `https://cleared-api.onrender.com`; if Render assigns a different API hostname, update that header too. The API session cookie is Secure and SameSite=Lax.
+
+### Required API environment variables
+
+The Blueprint marks secrets and deployment-specific values for entry in the Render Dashboard. Set:
+
+- `NODE_ENV=production`, `NODE_VERSION=24.19.0`, and `CLEARED_DB_PATH=/var/data/cleared.sqlite` (provided by the Blueprint).
+- `SESSION_SECRET`: generate a strong secret of at least 32 characters; the Blueprint generates one.
+- `APP_BASE_URL`: exact HTTPS frontend URL, such as `https://cleared-web.onrender.com`.
+- `CORS_ORIGINS`: exact frontend origin, such as `https://cleared-web.onrender.com` (no path or trailing slash).
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `MAIL_FROM`: verified production mail sender configuration.
+- `MFA_ENCRYPTION_KEY`: a stable, randomly generated key encoding exactly 32 bytes as 64 hex characters (or base64). Keep this value backed up securely; changing it prevents decrypting existing MFA secrets.
+- `FILE_STORAGE=s3`, `S3_ENDPOINT` (HTTPS), `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`; set `S3_REGION` and `S3_SESSION_TOKEN` when required by the S3-compatible provider. Keep the bucket private.
+- `FILE_SCANNER=clamav`, `CLAMAV_HOST`, and `CLAMAV_PORT` if not using the default `3310`. The API must be able to reach the ClamAV service over the network.
+
+`GEMINI_API_KEY` and `GEMINI_MODEL` are optional for deployments that use AI verification. AI verification remains disabled per workspace by default. If configuring the key, follow the existing `GEMINI_PAID_TIER_CONFIRMED` billing-attestation guidance above. Never copy `.env` into Render or commit its values. Render's process environment takes precedence over `.env`; the production service must set `NODE_ENV=production` itself.
+
+### Database initialization and migrations
+
+On the first API start, SQLite creates missing tables and applies the existing additive startup migrations. The Phase 3 conversion runs first and creates a timestamped SQLite backup before changing a legacy schema; the audit hash-chain backfill follows, also creating a backup when needed. These startup migrations preserve existing rows and are idempotent for an already-current schema. Keep the service at one instance during migration and retain the generated backups. Do not run either `down` command during deployment; Phase 3 rollback archives tables and changes the schema.
+
+A Render disk preserves files across restarts and redeploys after it is attached, but it does not copy `apps/api/data/cleared.sqlite` from a developer computer. The API never resets the configured database on normal startup, but a missing file creates a new empty SQLite database. If production must start with an existing local database, make and verify a SQLite-consistent backup before deployment, transfer it to the attached disk using Render's SSH/SCP workflow, then point `CLEARED_DB_PATH` at that uploaded copy and restart so the startup migrations run on it. Do not copy a live `.sqlite` file by itself while writes are occurring; `db:backup` uses SQLite `VACUUM INTO`, which includes committed WAL state, then runs `integrity_check` and refuses to overwrite an existing destination. Keep an untouched offline copy until the migrated production database and its records are verified. MFA requires the same `MFA_ENCRYPTION_KEY` as the source database.
+
+Create a protected backup outside the database file's directory (choose a timestamp that does not already exist):
+
+```sh
+npm run db:backup --workspace @cleared/api -- /var/data/backups/cleared-2026-11-15T120000.sqlite
+```
+
+The backup tool sets restrictive file permissions where supported. Copy the verified backup off the Render service/disk to an access-controlled backup location; the on-disk copy alone is not independent protection. To restore, first create and download a fresh backup of the current database, stop or isolate API traffic, transfer the chosen verified backup to a new path on `/var/data` without overwriting the current file, set `CLEARED_DB_PATH` to that new path, and restart the single API instance. Check `PRAGMA integrity_check` and `npm run audit:verify --workspace @cleared/api` after startup. If the restore is bad, switch `CLEARED_DB_PATH` back to the retained prior database and restart; do not delete either file until recovery is confirmed. The automated backup test restores a WAL-mode SQLite fixture and checks its data and integrity, but it is not a production restore drill. Render disk snapshots are useful recovery points, not a substitute for off-disk backups.
+
+For a deliberate/manual migration on an already running API instance, use the Render service Shell (where the attached disk is available) and run these in order:
+
+```sh
+npm run db:up --workspace @cleared/api
+npm run audit:chain:up --workspace @cleared/api
+npm run audit:verify --workspace @cleared/api
+```
+
+`db:up` loads the current store initializer, which also runs the audit-chain migration after Phase 3; the explicit `audit:chain:up` is therefore an idempotent follow-up and creates its own backup. Avoid running migrations from a separate instance or while scaling the API beyond one process.
+
+### Verify the deployment build
+
+Before deploying, run `npm install`, `npm run build`, and confirm `apps/web/dist/index.html` exists. The build embeds `CLEARED_API_HOST`; Blueprint builds get that from the API service reference. For a manual Static Site setup, set `CLEARED_API_HOST` to the public API hostname without `https://` or a path. Confirm the built app sends `/api/...` requests to `https://<CLEARED_API_HOST>/api/...`, and that CORS allows the exact frontend origin.
 
 ## Installation and local startup
 
@@ -426,7 +480,7 @@ This MVP is intentionally compact, but several things are still not implemented 
 - source uploads are limited to TXT, MD, and CSV
 - production needs configured SMTP for invitation and account emails
 - sessions are persisted in SQLite, so the setup is single-instance and has no managed session store
-- deployment and scaling configuration for production is still a roadmap item
+- Render deployment configuration exists, but production credentials, custom domains, service connectivity, and end-to-end deployment validation remain operator tasks
 - the MinIO/ClamAV integration suite requires Docker Compose and must be run against local containers before deployment
 - no managed PostgreSQL runtime is active; see [PostgreSQL portability notes](docs/postgresql-portability.md)
 - no production-ready SSO is implemented
@@ -437,7 +491,7 @@ This MVP is intentionally compact, but several things are still not implemented 
 - solo workspaces cannot approve their own submissions because separation of duties requires a different user
 - suggested corrections are not persisted as correction records; editing the draft itself does create a revision
 - review notifications are in-app only: reviewers/managers are notified on submission and creators on decisions; email, preferences, and push delivery are not implemented
-- no scheduled backups, restore drills, or production operations setup exist; schema migration commands create one-off SQLite safety snapshots only
+- a SQLite-safe backup command and restore test exist, but scheduled off-disk backups, a production restore drill, monitoring, and incident recovery are not configured
 - Node 24.19.x marks `node:sqlite` as Stability 1.2, Release candidate; see the [Node.js v24.19 SQLite documentation](https://nodejs.org/download/release/v24.19.0/docs/api/sqlite.html)
 - the audit hash chain detects edits and interior row deletion, but it cannot establish trust if a host administrator replaces the entire database and recomputes the chain; send logs to a separate store for stronger assurance
 
@@ -445,7 +499,7 @@ This MVP is intentionally compact, but several things are still not implemented 
 
 1. **Phase 4 — Verification hardening:** bounded passage retrieval, deterministic checks, optional AI with strict output validation, and background jobs are implemented. Delimiters and system instructions reduce prompt-injection risk but are not a comprehensive defense; see the evaluation results from `npm run eval --workspace @cleared/api`.
 2. **Phase 5 — Product features:** in-app review submission and decision notifications are implemented; add delivery preferences and optional email notifications.
-3. **Production deployment:** complete deployment configuration and runbooks; validate backups/restores, secret handling, SMTP, S3-compatible storage, ClamAV, monitoring, and operational recovery in the target environment.
+3. **Production deployment:** validate secrets, custom domains, SMTP, S3-compatible storage, ClamAV network access, backups/restores, monitoring, and operational recovery in the target environment.
 4. **PostgreSQL:** use `docs/postgresql-portability.md` to plan a later managed PostgreSQL migration and workspace row-level security. SQLite remains the only active runtime until PostgreSQL is separately implemented and tested. The `supabase/` directory is an inactive schema/RLS planning scaffold.
 
 ## Security considerations

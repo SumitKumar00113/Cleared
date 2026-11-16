@@ -167,7 +167,7 @@ Local `.env` files, SQLite databases, private storage, and uploads are runtime d
 - Express 4
 - `node:sqlite` for SQLite persistence
 - `multer` for file uploads
-- Nodemailer for production SMTP delivery; development uses a logged in-memory outbox
+- Gmail API over HTTPS or Nodemailer SMTP for production email; development uses a logged in-memory outbox
 - Private local file storage for development and S3-compatible private storage for production
 - Pluggable file scanning with ClamAV; MinIO + ClamAV integration-test setup
 
@@ -217,7 +217,8 @@ Copy `.env.example` to `.env` and customize it for your environment.
 | `WEB_PORT` | No | Web development server port; defaults to `5173`. |
 | `NODE_ENV` | No | Set to `production` for production security and storage requirements. |
 | `APP_BASE_URL` | Production | HTTPS public URL used for invitation and account-action links. |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Production | SMTP delivery for verification, password, unlock, and invitation messages. |
+| `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN`, `MAIL_FROM` | Production | Gmail API OAuth delivery over HTTPS. The Gmail OAuth grant must include `https://www.googleapis.com/auth/gmail.send`; `MAIL_FROM` must be the authenticated account or a configured send-as address. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Production fallback | SMTP delivery for verification, password, unlock, and invitation messages. Gmail API credentials take precedence when configured. |
 | `FILE_STORAGE`, `LOCAL_STORAGE_DIR` | No | Select local development or private S3-compatible storage; optional local directory override. |
 | `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_SESSION_TOKEN` | S3 | S3-compatible storage settings. Production endpoint must use HTTPS. |
 | `FILE_SCANNER`, `CLAMAV_HOST`, `CLAMAV_PORT` | Production | Configure ClamAV; production fails closed without a configured scanner. |
@@ -258,7 +259,8 @@ The Blueprint marks secrets and deployment-specific values for entry in the Rend
 - `SESSION_SECRET`: generate a strong secret of at least 32 characters; the Blueprint generates one.
 - `APP_BASE_URL`: exact HTTPS URL of the combined app, such as `https://your-service.onrender.com`.
 - `CORS_ORIGINS`: exact combined app origin (no path or trailing slash), such as `https://your-service.onrender.com`.
-- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `MAIL_FROM`: verified production mail sender configuration.
+- Gmail API mail: `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN`, and `MAIL_FROM`. Configure the Gmail API OAuth grant with the `gmail.send` scope. The authenticated Gmail account should match `MAIL_FROM` unless the sender address is configured as a Gmail send-as alias.
+- SMTP fallback: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `MAIL_FROM`.
 - `MFA_ENCRYPTION_KEY`: a stable, randomly generated key encoding exactly 32 bytes as 64 hex characters (or base64). Keep this value backed up securely; changing it prevents decrypting existing MFA secrets.
 - `FILE_STORAGE=s3`, `S3_ENDPOINT` (HTTPS), `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`; set `S3_REGION` and `S3_SESSION_TOKEN` when required by the S3-compatible provider. Keep the bucket private.
 - `FILE_SCANNER=clamav`, `CLAMAV_HOST`, and `CLAMAV_PORT` if not using the default `3310`. The API must be able to reach the ClamAV service over the network.
@@ -291,7 +293,7 @@ npm run audit:verify --workspace @cleared/api
 
 ### Verify the deployment build
 
-Before deploying, run `npm install`, `npm run build`, and confirm `apps/web/dist/index.html` exists. Leave `CLEARED_API_HOST` unset so the frontend uses same-origin `/api/...` requests. After the service is deployed, set `APP_BASE_URL` and `CORS_ORIGINS` to its exact HTTPS URL and redeploy/restart it.
+Before deploying, run `npm install`, `npm run build`, and confirm `apps/web/dist/index.html` exists. Leave `CLEARED_API_HOST` unset so the frontend uses same-origin `/api/...` requests. After the service is deployed, set `APP_BASE_URL` and `CORS_ORIGINS` to its exact HTTPS URL and redeploy/restart it. Render Free blocks outbound SMTP, so configure the Gmail API OAuth variables for email delivery on a Free web service.
 
 ## Installation and local startup
 

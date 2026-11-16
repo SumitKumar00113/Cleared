@@ -27,8 +27,13 @@ export function validateEnvironment(env = process.env) {
     let appBase;
     try { appBase = new URL(env.APP_BASE_URL); } catch { throw new Error('Production requires an HTTPS APP_BASE_URL.'); }
     if (appBase.protocol !== 'https:' || appBase.origin !== env.APP_BASE_URL.replace(/\/$/, '') || appBase.username || appBase.password) throw new Error('Production APP_BASE_URL must be an exact HTTPS origin.');
-    for (const name of ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'MAIL_FROM']) if (!env[name]) throw new Error(`Production requires ${name}.`);
-    if (!Number.isInteger(Number(env.SMTP_PORT)) || Number(env.SMTP_PORT) < 1 || Number(env.SMTP_PORT) > 65535) throw new Error('Production requires a valid SMTP_PORT.');
+    if (!env.MAIL_FROM) throw new Error('Production requires MAIL_FROM.');
+    const gmailNames = ['GMAIL_CLIENT_ID', 'GMAIL_CLIENT_SECRET', 'GMAIL_REFRESH_TOKEN'];
+    const gmailConfigured = gmailNames.filter((name) => Boolean(env[name])).length;
+    if (gmailConfigured > 0 && gmailConfigured < gmailNames.length) throw new Error(`Production Gmail API mail requires ${gmailNames.join(', ')}.`);
+    const smtpConfigured = Boolean(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS);
+    if (gmailConfigured === 0 && !smtpConfigured) throw new Error('Production requires Gmail API OAuth credentials or SMTP_HOST, SMTP_USER, and SMTP_PASS.');
+    if (gmailConfigured === 0 && (!Number.isInteger(Number(env.SMTP_PORT || 587)) || Number(env.SMTP_PORT || 587) < 1 || Number(env.SMTP_PORT || 587) > 65535)) throw new Error('Production requires a valid SMTP_PORT.');
     try { encryptionKey(env.MFA_ENCRYPTION_KEY); } catch { throw new Error('Production requires a valid 32-byte MFA_ENCRYPTION_KEY.'); }
     if ((env.FILE_STORAGE || 's3') !== 's3') throw new Error('Production requires private S3-compatible FILE_STORAGE=s3.');
     for (const name of ['S3_ENDPOINT','S3_BUCKET','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY']) if (!env[name]) throw new Error(`Production requires ${name}.`);

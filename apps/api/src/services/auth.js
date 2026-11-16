@@ -52,6 +52,7 @@ function mailFailure(error) {
     code: error?.code ? String(error.code).slice(0, 40) : undefined,
     responseCode: Number.isInteger(error?.responseCode) ? error.responseCode : undefined,
     command: error?.command ? String(error.command).slice(0, 40) : undefined,
+    detail: error?.detail ? String(error.detail).slice(0, 80) : undefined,
   };
   console.error('Email delivery failed:', JSON.stringify(details));
 }

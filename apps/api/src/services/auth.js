@@ -46,7 +46,15 @@ function validateCredentials({ workspaceName, email, password }) {
 function applicationBase(request) { return String(process.env.APP_BASE_URL || request.get('origin') || `${request.protocol}://${request.get('host')}`).replace(/\/$/, ''); }
 function actionUrl(request, page, token) { return `${applicationBase(request)}/${page}?token=${encodeURIComponent(token)}`; }
 function isEmail(value) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '')); }
-function mailFailure(error) { console.error('Email delivery failed:', error?.name || 'Error'); }
+function mailFailure(error) {
+  const details = {
+    name: String(error?.name || 'Error').slice(0, 40),
+    code: error?.code ? String(error.code).slice(0, 40) : undefined,
+    responseCode: Number.isInteger(error?.responseCode) ? error.responseCode : undefined,
+    command: error?.command ? String(error.command).slice(0, 40) : undefined,
+  };
+  console.error('Email delivery failed:', JSON.stringify(details));
+}
 function authKeys(request, email) {
   const ip = String(request.ip || request.socket?.remoteAddress || 'unknown').replace(/^::ffff:/, '');
   const account = createHash('sha256').update(String(email || '').trim().toLowerCase()).digest('hex');

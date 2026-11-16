@@ -84,6 +84,12 @@ export function createApp() {
   app.use('/api/notifications', notificationsRouter);
   app.use('/api/sources', sourcesRouter);
   app.use('/api/verification', verificationRouter);
+  const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../web/dist');
+  app.use(express.static(webDist, { index: false }));
+  app.get('*', (request, response, next) => {
+    if (request.path.startsWith('/api/')) return next();
+    return response.sendFile(path.join(webDist, 'index.html'), (error) => error && next(error));
+  });
   app.use((error, _request, response, _next) => {
     if (error.name === 'MulterError') return response.status(400).json({ error: error.code === 'LIMIT_FILE_SIZE' ? 'Files must be 20 MB or smaller.' : 'Upload one file at a time.' });
     if (error.status) return response.status(error.status).json({ error: error.message });

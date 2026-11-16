@@ -230,7 +230,6 @@ Copy `.env.example` to `.env` and customize it for your environment.
 | `VERIFICATION_DAILY_CHAR_CAP` | Optional | Per-workspace daily cap for characters sent to Gemini; defaults to `1,000,000`. |
 | `VERIFICATION_MAX_RETRIEVED_CHARS` | Optional | Maximum combined retrieved passage text per job; defaults to `80,000`. |
 | `CLEARED_DB_PATH` | Optional | Custom SQLite file path |
-| `CLEARED_API_HOST` | Render frontend build | API host name used to send browser requests to the separately deployed API service. Do not include a path; the frontend uses HTTPS. |
 
 Notes:
 - Use Node `24.19.x` (also declared in `package.json` engines).
@@ -243,13 +242,13 @@ Notes:
 
 ## Render deployment
 
-`render.yaml` defines a Render Node web service for `apps/api` and a Render static site for `apps/web`. Both use Node `24.19.0` and repository-root builds. The API uses `npm install` and `npm run start --workspace @cleared/api`, has a `/var/data` persistent disk, and stores SQLite at `/var/data/cleared.sqlite`. The static site builds with `npm install && npm run build` and publishes `apps/web/dist`. Its `CLEARED_API_HOST` build variable is linked to the API service's public Render hostname; browser requests use HTTPS, CORS credentials, and the configured API origin.
+`render.yaml` defines one Render Node web service that builds the React frontend and serves it alongside the API from the same origin. The service runs `npm install && npm run build`, starts with `npm run start --workspace @cleared/api`, has a `/var/data` persistent disk, and stores SQLite at `/var/data/cleared.sqlite`. The frontend uses relative `/api/...` URLs, so browser requests and authentication cookies stay on the same site. The server applies the security headers to both API and frontend responses.
 
 The API disk is single-instance storage. Keep the API at one instance and do not attach a second service to its disk. SQLite enables WAL, `synchronous=NORMAL`, foreign keys, and a 5-second busy timeout; transactions that change schema/data use SQLite transactions where implemented. WAL supports concurrent readers and serializes writes, but this setup is for a single API process and is not a multi-instance database. Render mounts persistent disks at runtime, not during build or pre-deploy commands, so do not run database migrations in the build or pre-deploy phase.
 
 ### Render service settings
 
-The Blueprint supplies the root directory, build and start commands, `apps/web/dist` publish path, `/api/health` health check, Node version, API disk mount, frontend API-host link, SPA rewrite, and static response security headers. Create/sync the Blueprint, then set the API service's `APP_BASE_URL` to the HTTPS frontend URL and `CORS_ORIGINS` to that exact HTTPS origin (no path or trailing slash). Keep one instance for SQLite. For browser cookie compatibility, use custom frontend and API domains under the same registrable domain (for example, `app.example.com` and `api.example.com`); the app and API must both be HTTPS. The default `*.onrender.com` app and API hosts are different sites for cookie purposes, so use a custom API domain and override the static site's `CLEARED_API_HOST` with that domain before relying on sign-in. Also update the Static Site CSP `connect-src` header in Render to allow the exact API origin. The Blueprint's CSP currently allows `https://cleared-api.onrender.com`; if Render assigns a different API hostname, update that header too. The API session cookie is Secure and SameSite=Lax.
+The Blueprint supplies the root directory, build and start commands, `/api/health` health check, Node version, and API disk mount. Sync the Blueprint to deploy the combined app. Set `APP_BASE_URL` to the service's HTTPS URL and `CORS_ORIGINS` to that same exact origin (no path or trailing slash); keep one instance for SQLite. Since the frontend and API share one origin, no custom domain is required. The API session cookie is Secure and SameSite=Lax.
 
 ### Required API environment variables
 
@@ -257,8 +256,8 @@ The Blueprint marks secrets and deployment-specific values for entry in the Rend
 
 - `NODE_ENV=production`, `NODE_VERSION=24.19.0`, and `CLEARED_DB_PATH=/var/data/cleared.sqlite` (provided by the Blueprint).
 - `SESSION_SECRET`: generate a strong secret of at least 32 characters; the Blueprint generates one.
-- `APP_BASE_URL`: exact HTTPS frontend URL, such as `https://cleared-web.onrender.com`.
-- `CORS_ORIGINS`: exact frontend origin, such as `https://cleared-web.onrender.com` (no path or trailing slash).
+- `APP_BASE_URL`: exact HTTPS URL of the combined app, such as `https://your-service.onrender.com`.
+- `CORS_ORIGINS`: exact combined app origin (no path or trailing slash), such as `https://your-service.onrender.com`.
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `MAIL_FROM`: verified production mail sender configuration.
 - `MFA_ENCRYPTION_KEY`: a stable, randomly generated key encoding exactly 32 bytes as 64 hex characters (or base64). Keep this value backed up securely; changing it prevents decrypting existing MFA secrets.
 - `FILE_STORAGE=s3`, `S3_ENDPOINT` (HTTPS), `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`; set `S3_REGION` and `S3_SESSION_TOKEN` when required by the S3-compatible provider. Keep the bucket private.
@@ -292,7 +291,7 @@ npm run audit:verify --workspace @cleared/api
 
 ### Verify the deployment build
 
-Before deploying, run `npm install`, `npm run build`, and confirm `apps/web/dist/index.html` exists. The build embeds `CLEARED_API_HOST`; Blueprint builds get that from the API service reference. For a manual Static Site setup, set `CLEARED_API_HOST` to the public API hostname without `https://` or a path. Confirm the built app sends `/api/...` requests to `https://<CLEARED_API_HOST>/api/...`, and that CORS allows the exact frontend origin.
+Before deploying, run `npm install`, `npm run build`, and confirm `apps/web/dist/index.html` exists. Leave `CLEARED_API_HOST` unset so the frontend uses same-origin `/api/...` requests. After the service is deployed, set `APP_BASE_URL` and `CORS_ORIGINS` to its exact HTTPS URL and redeploy/restart it.
 
 ## Installation and local startup
 
@@ -499,7 +498,7 @@ This MVP is intentionally compact, but several things are still not implemented 
 
 1. **Phase 4 — Verification hardening:** bounded passage retrieval, deterministic checks, optional AI with strict output validation, and background jobs are implemented. Delimiters and system instructions reduce prompt-injection risk but are not a comprehensive defense; see the evaluation results from `npm run eval --workspace @cleared/api`.
 2. **Phase 5 — Product features:** in-app review submission and decision notifications are implemented; add delivery preferences and optional email notifications.
-3. **Production deployment:** validate secrets, custom domains, SMTP, S3-compatible storage, ClamAV network access, backups/restores, monitoring, and operational recovery in the target environment.
+3. **Production deployment:** validate secrets, the combined same-origin Render service, SMTP, S3-compatible storage, ClamAV network access, backups/restores, monitoring, and operational recovery in the target environment.
 4. **PostgreSQL:** use `docs/postgresql-portability.md` to plan a later managed PostgreSQL migration and workspace row-level security. SQLite remains the only active runtime until PostgreSQL is separately implemented and tested. The `supabase/` directory is an inactive schema/RLS planning scaffold.
 
 ## Security considerations

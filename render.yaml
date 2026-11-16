@@ -5,7 +5,7 @@ services:
     plan: starter
     numInstances: 1
     rootDir: .
-    buildCommand: npm install
+    buildCommand: npm install && npm run build
     startCommand: npm run start --workspace @cleared/api
     healthCheckPath: /api/health
     disk:
@@ -58,37 +58,3 @@ services:
       - key: CLAMAV_PORT
         value: 3310
 
-  - type: web
-    name: cleared-web
-    runtime: static
-    rootDir: .
-    buildCommand: npm install && npm run build
-    staticPublishPath: apps/web/dist
-    envVars:
-      - key: NODE_VERSION
-        value: 24.19.0
-      - key: CLEARED_API_HOST
-        fromService:
-          type: web
-          name: cleared-api
-          envVarKey: RENDER_EXTERNAL_HOSTNAME
-    headers:
-      - path: /*
-        name: Content-Security-Policy
-        value: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://cleared-api.onrender.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
-      - path: /*
-        name: X-Content-Type-Options
-        value: nosniff
-      - path: /*
-        name: X-Frame-Options
-        value: DENY
-      - path: /*
-        name: Referrer-Policy
-        value: strict-origin-when-cross-origin
-      - path: /*
-        name: Strict-Transport-Security
-        value: max-age=31536000; includeSubDomains
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
